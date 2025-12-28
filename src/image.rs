@@ -2,7 +2,7 @@
 
 use crate::device::{Em100, HwVersion};
 use crate::error::Result;
-use byteorder::{LittleEndian, ByteOrder};
+use byteorder::{ByteOrder, LittleEndian};
 
 /// Flash descriptor signature
 const FD_SIGNATURE: u32 = 0x0FF0A55A;
@@ -41,7 +41,7 @@ fn get_ifd_version(flcomp: u32) -> IfdVersion {
     let read_freq = (flcomp >> 17) & 7;
 
     match read_freq {
-        0 => IfdVersion::V1, // 20MHz
+        0 => IfdVersion::V1,     // 20MHz
         4 | 6 => IfdVersion::V2, // 50MHz/30MHz or 17MHz
         _ => {
             eprintln!("Unknown descriptor version: {}", read_freq);

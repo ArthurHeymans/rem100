@@ -87,7 +87,8 @@ pub fn parse_dcfg(data: &[u8]) -> Result<ChipDesc> {
             .iter()
             .position(|&b| b == 0)
             .unwrap_or(data.len() - vendor_offset);
-        chip.vendor = String::from_utf8_lossy(&data[vendor_offset..vendor_offset + end]).to_string();
+        chip.vendor =
+            String::from_utf8_lossy(&data[vendor_offset..vendor_offset + end]).to_string();
     }
 
     if chip_name_offset < data.len() {
@@ -258,9 +259,7 @@ impl ChipDatabase {
 
         // Read version
         let version_data = configs.find("configs/VERSION")?;
-        let version = String::from_utf8_lossy(&version_data)
-            .trim()
-            .to_string();
+        let version = String::from_utf8_lossy(&version_data).trim().to_string();
 
         Ok(Self { configs, version })
     }
@@ -268,9 +267,10 @@ impl ChipDatabase {
     /// Find a chip by name
     pub fn find_chip(&self, name: &str) -> Result<ChipDesc> {
         let cfg_name = format!("configs/{}.cfg", name);
-        let data = self.configs.find(&cfg_name).map_err(|_| {
-            Error::InvalidChip(format!("Could not find chip '{}'", name))
-        })?;
+        let data = self
+            .configs
+            .find(&cfg_name)
+            .map_err(|_| Error::InvalidChip(format!("Could not find chip '{}'", name)))?;
         parse_dcfg(&data)
     }
 
@@ -297,7 +297,9 @@ pub fn get_em100_file(name: &str) -> Result<std::path::PathBuf> {
     } else if let Some(home) = dirs::home_dir() {
         home.join(".em100")
     } else {
-        return Err(Error::FileNotFound("Could not determine home directory".to_string()));
+        return Err(Error::FileNotFound(
+            "Could not determine home directory".to_string(),
+        ));
     };
 
     // Create directory if it doesn't exist

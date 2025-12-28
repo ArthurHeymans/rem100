@@ -92,7 +92,11 @@ pub fn fpga_get_voltage(em100: &Em100) -> Result<u8> {
     Ok(if em100.fpga & 0x8000 != 0 { 18 } else { 33 })
 }
 
-/// Reconfigure FPGA (alias for reconfig_fpga)
+/// Reconfigure FPGA (without waiting)
+///
+/// This is used internally before switching FPGA voltage, where the caller
+/// handles the required 2-second wait after the voltage switch command.
+/// For standalone FPGA reconfiguration with proper timing, use `reconfig_fpga`.
 pub fn fpga_reconfigure(em100: &Em100) -> Result<()> {
     let cmd = [0x20u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     usb::send_cmd(&em100.interface, &cmd)?;

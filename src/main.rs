@@ -21,10 +21,12 @@ use std::sync::Arc;
 #[command(author = "Google Inc., Rust port contributors")]
 #[command(version = "0.1.0")]
 #[command(about = "EM100Pro SPI flash emulator command-line utility")]
-#[command(long_about = "A Rust port of the em100 utility for controlling the Dediprog EM100Pro SPI flash emulator hardware.
+#[command(
+    long_about = "A Rust port of the em100 utility for controlling the Dediprog EM100Pro SPI flash emulator hardware.
 
 Example:
-  rem100 --stop --set M25P80 -d file.bin -v --start -t -O 0xfff00000")]
+  rem100 --stop --set M25P80 -d file.bin -v --start -t -O 0xfff00000"
+)]
 struct Args {
     /// Select chip emulation
     #[arg(short = 'c', long = "set")]
@@ -449,6 +451,19 @@ fn main() {
             std::process::exit(1);
         }
 
+        // When a chip is specified, validate that file size matches expected size
+        if chip.is_some() {
+            let expected_size = maxlen - spi_start_address as usize;
+            if data.len() != expected_size {
+                eprintln!(
+                    "FATAL: file size ({}) does not match chip size minus start address ({}).",
+                    data.len(),
+                    expected_size
+                );
+                std::process::exit(1);
+            }
+        }
+
         // Apply image auto-correction if requested
         if args.compatible {
             autocorrect_image(&em100, &mut data).ok();
@@ -537,21 +552,13 @@ fn main() {
         println!(". Press CTRL-C to exit.\n");
         std::io::stdout().flush().ok();
 
-        let address_offset = args
-            .offset
-            .as_ref()
-            .and_then(|s| parse_hex(s))
-            .unwrap_or(0);
+        let address_offset = args.offset.as_ref().and_then(|s| parse_hex(s)).unwrap_or(0);
 
         if address_offset != 0 {
             println!("Address offset: 0x{:08x}", address_offset);
         }
 
-        let address_length = args
-            .length
-            .as_ref()
-            .and_then(|s| parse_hex(s))
-            .unwrap_or(0);
+        let address_length = args.length.as_ref().and_then(|s| parse_hex(s)).unwrap_or(0);
 
         let mut trace_state = TraceState::new(args.brief, args.address_mode.unwrap_or(3));
         let mut usb_errors = 0u32;

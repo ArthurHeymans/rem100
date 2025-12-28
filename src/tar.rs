@@ -14,9 +14,8 @@ pub struct TarFile {
 impl TarFile {
     /// Load and decompress a .tar.xz file
     pub fn load_compressed(filename: &std::path::Path) -> Result<Self> {
-        let mut file = File::open(filename).map_err(|e| {
-            Error::FileNotFound(format!("{}: {}", filename.display(), e))
-        })?;
+        let mut file = File::open(filename)
+            .map_err(|e| Error::FileNotFound(format!("{}: {}", filename.display(), e)))?;
 
         let mut compressed = Vec::new();
         file.read_to_end(&mut compressed)?;
@@ -24,9 +23,9 @@ impl TarFile {
         // Decompress XZ
         let mut decompressor = xz2::read::XzDecoder::new(&compressed[..]);
         let mut data = Vec::new();
-        decompressor.read_to_end(&mut data).map_err(|e| {
-            Error::Decompression(format!("XZ decompression failed: {}", e))
-        })?;
+        decompressor
+            .read_to_end(&mut data)
+            .map_err(|e| Error::Decompression(format!("XZ decompression failed: {}", e)))?;
 
         // Parse tar entries
         let entries = parse_tar_entries(&data)?;
@@ -119,16 +118,12 @@ fn parse_tar_entries(data: &[u8]) -> Result<HashMap<String, (usize, usize)>> {
 
         // Parse size (octal)
         let size_str = String::from_utf8_lossy(&data[pos + 124..pos + 136]);
-        let size = usize::from_str_radix(size_str.trim().trim_end_matches('\0'), 8)
-            .unwrap_or(0);
+        let size = usize::from_str_radix(size_str.trim().trim_end_matches('\0'), 8).unwrap_or(0);
 
         // Verify checksum
         let stored_checksum_str = String::from_utf8_lossy(&data[pos + 148..pos + 156]);
-        let stored_checksum = u32::from_str_radix(
-            stored_checksum_str.trim().trim_end_matches('\0'),
-            8,
-        )
-        .unwrap_or(0);
+        let stored_checksum =
+            u32::from_str_radix(stored_checksum_str.trim().trim_end_matches('\0'), 8).unwrap_or(0);
         let computed_checksum = compute_checksum(&data[pos..pos + TAR_HEADER_SIZE]);
 
         if stored_checksum != computed_checksum {

@@ -102,11 +102,10 @@ pub fn write_sdram(em100: &Em100, data: &[u8], address: u32) -> Result<()> {
     while bytes_sent < length {
         let bytes_to_send = std::cmp::min(length - bytes_sent, TRANSFER_LENGTH);
 
-        let completion = block_on(
-            em100
-                .interface
-                .bulk_out(ENDPOINT_OUT, data[bytes_sent..bytes_sent + bytes_to_send].to_vec()),
-        );
+        let completion = block_on(em100.interface.bulk_out(
+            ENDPOINT_OUT,
+            data[bytes_sent..bytes_sent + bytes_to_send].to_vec(),
+        ));
         completion.status?;
         let actual = completion.data.actual_length();
 

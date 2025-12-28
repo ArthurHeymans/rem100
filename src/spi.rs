@@ -141,6 +141,11 @@ pub fn unlock_spi_flash(em100: &Em100) -> Result<()> {
 }
 
 /// Erase a 64KB SPI flash sector
+///
+/// Note: The specification says to wait 5s before issuing another USB command,
+/// but the original C implementation does not actually wait. Omitting the wait
+/// here for compatibility and performance (firmware updates would otherwise
+/// take 155+ seconds for 31 sectors).
 pub fn erase_spi_flash_sector(em100: &Em100, sector: u8) -> Result<()> {
     if sector > 31 {
         return Err(Error::InvalidArgument(format!(
@@ -152,8 +157,6 @@ pub fn erase_spi_flash_sector(em100: &Em100, sector: u8) -> Result<()> {
     let cmd = [0x37u8, sector, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     usb::send_cmd(&em100.interface, &cmd)?;
 
-    // Specification says to wait 5s before issuing another USB command
-    thread::sleep(Duration::from_secs(5));
     Ok(())
 }
 
@@ -236,7 +239,10 @@ pub fn write_dfifo(em100: &Em100, data: &[u8], timeout: u16) -> Result<()> {
 
     let response = usb::get_response(&em100.interface, 512)?;
 
-    if response.len() == 2 && ((response[0] as usize) << 8 | response[1] as usize) == length && bytes_sent == length {
+    if response.len() == 2
+        && ((response[0] as usize) << 8 | response[1] as usize) == length
+        && bytes_sent == length
+    {
         Ok(())
     } else {
         Err(Error::Communication("dFIFO write failed".to_string()))

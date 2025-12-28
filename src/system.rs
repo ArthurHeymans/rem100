@@ -138,24 +138,7 @@ pub fn get_voltage(em100: &Em100, channel: GetVoltageChannel) -> Result<u32> {
 
 /// Set LED state
 pub fn set_led(em100: &Em100, state: LedState) -> Result<()> {
-    let cmd = [
-        0x13,
-        state as u8,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ];
+    let cmd = [0x13, state as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     usb::send_cmd(&em100.interface, &cmd)?;
     Ok(())
 }

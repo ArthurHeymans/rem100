@@ -5,7 +5,7 @@ use crate::device::{Em100, HwVersion};
 use crate::error::{Error, Result};
 use crate::spi;
 use crate::tar::TarFile;
-use byteorder::{LittleEndian, ByteOrder};
+use byteorder::{ByteOrder, LittleEndian};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs::File;
 use std::io::{Read, Write};
@@ -25,7 +25,7 @@ fn put_le32(data: &mut [u8], val: u32) {
 pub fn firmware_dump(em100: &Em100, filename: &str, firmware_is_dpfw: bool) -> Result<()> {
     let id = spi::get_spi_flash_id(em100)?;
     let rom_size = match id {
-        0x202015 => 2 * MB, // M25P16
+        0x202015 => 2 * MB,  // M25P16
         0xc27518 => 16 * MB, // MX77L12850F
         _ => {
             return Err(Error::InvalidFirmware(format!(
@@ -51,7 +51,7 @@ pub fn firmware_dump(em100: &Em100, filename: &str, firmware_is_dpfw: bool) -> R
         if i & 0x7fff == 0 {
             pb.set_position(i as u64);
         }
-        
+
         // Retry up to 3 times
         for retry in 0..3 {
             if spi::read_spi_flash_page(em100, i as u32, &mut data[i..i + 256]).is_ok() {
@@ -161,20 +161,14 @@ pub fn firmware_update(em100: &Em100, filename: &str, verify: bool) -> Result<()
     // Validate firmware file
     match em100.hw_version {
         HwVersion::Em100ProEarly | HwVersion::Em100Pro => {
-            if fw.len() < 0x48
-                || &fw[..8] != b"em100pro"
-                || &fw[0x28..0x2c] != b"WFPD"
-            {
+            if fw.len() < 0x48 || &fw[..8] != b"em100pro" || &fw[0x28..0x2c] != b"WFPD" {
                 return Err(Error::InvalidFirmware(
                     "Not an EM100Pro (original) firmware file.".to_string(),
                 ));
             }
         }
         HwVersion::Em100ProG2 => {
-            if fw.len() < 0x48
-                || &fw[..11] != b"EM100Pro-G2"
-                || &fw[0x28..0x2c] != b"WFPD"
-            {
+            if fw.len() < 0x48 || &fw[..11] != b"EM100Pro-G2" || &fw[0x28..0x2c] != b"WFPD" {
                 return Err(Error::InvalidFirmware(
                     "Not an EM100Pro-G2 firmware file.".to_string(),
                 ));
@@ -395,7 +389,7 @@ fn load_auto_firmware(em100: &Em100) -> Result<Vec<u8>> {
         }
     }
 
-    selected
-        .map(|(_, data)| data)
-        .ok_or_else(|| Error::InvalidFirmware("Could not find suitable firmware for autoupdate".to_string()))
+    selected.map(|(_, data)| data).ok_or_else(|| {
+        Error::InvalidFirmware("Could not find suitable firmware for autoupdate".to_string())
+    })
 }

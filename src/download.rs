@@ -17,10 +17,7 @@ const VERSION_NAME: &str = "VERSION";
 
 /// Download a file from Google Drive
 fn download_from_drive(id: &str, filename: &std::path::Path) -> Result<()> {
-    let url = format!(
-        "https://drive.google.com/uc?export=download&id={}",
-        id
-    );
+    let url = format!("https://drive.google.com/uc?export=download&id={}", id);
 
     let client = reqwest::blocking::Client::builder()
         .user_agent("em100-agent/1.0")
@@ -33,10 +30,7 @@ fn download_from_drive(id: &str, filename: &std::path::Path) -> Result<()> {
         .map_err(|e| Error::Network(e.to_string()))?;
 
     if !response.status().is_success() {
-        return Err(Error::Network(format!(
-            "HTTP error: {}",
-            response.status()
-        )));
+        return Err(Error::Network(format!("HTTP error: {}", response.status())));
     }
 
     let bytes = response
@@ -119,9 +113,8 @@ pub fn update_all_files() -> Result<()> {
     // Clean up temp file
     std::fs::remove_file(&tmp_version_path).ok();
 
-    let new_version = new_version.ok_or_else(|| {
-        Error::Parse("Parse error in upstream VERSION.".to_string())
-    })?;
+    let new_version =
+        new_version.ok_or_else(|| Error::Parse("Parse error in upstream VERSION.".to_string()))?;
 
     // Compare timestamps
     if let Some(old) = &old_version {

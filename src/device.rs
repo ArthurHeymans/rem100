@@ -219,8 +219,10 @@ impl Em100 {
         let mut data = [0u8; 256];
         spi::read_spi_flash_page(self, 0x1fff00, &mut data)?;
 
-        self.serial_no =
-            (data[5] as u32) << 24 | (data[4] as u32) << 16 | (data[3] as u32) << 8 | data[2] as u32;
+        self.serial_no = (data[5] as u32) << 24
+            | (data[4] as u32) << 16
+            | (data[3] as u32) << 8
+            | data[2] as u32;
         self.hw_version = HwVersion::from(data[1]);
         Ok(())
     }
@@ -369,8 +371,10 @@ impl Em100 {
         let mut data = [0u8; 512];
         spi::read_spi_flash_page(self, 0x1fff00, &mut data[..256])?;
 
-        let old_serial =
-            (data[5] as u32) << 24 | (data[4] as u32) << 16 | (data[3] as u32) << 8 | data[2] as u32;
+        let old_serial = (data[5] as u32) << 24
+            | (data[4] as u32) << 16
+            | (data[3] as u32) << 8
+            | data[2] as u32;
 
         if old_serial == serial {
             println!("Serial number unchanged.");
@@ -451,11 +455,7 @@ impl Em100 {
                         }
                     );
                 } else {
-                    println!(
-                        "FPGA version: {}.{:02}",
-                        self.fpga >> 8,
-                        self.fpga & 0xff
-                    );
+                    println!("FPGA version: {}.{:02}", self.fpga >> 8, self.fpga & 0xff);
                 }
             }
             HwVersion::Em100ProG2 => {
@@ -480,20 +480,50 @@ impl Em100 {
     pub fn debug(&self) -> Result<()> {
         println!("Voltages:");
         system::set_led(self, system::LedState::BothOff)?;
-        println!("  1.2V:        {}mV", system::get_voltage(self, system::GetVoltageChannel::V1_2)?);
-        println!("  E_VCC:       {}mV", system::get_voltage(self, system::GetVoltageChannel::EVcc)?);
+        println!(
+            "  1.2V:        {}mV",
+            system::get_voltage(self, system::GetVoltageChannel::V1_2)?
+        );
+        println!(
+            "  E_VCC:       {}mV",
+            system::get_voltage(self, system::GetVoltageChannel::EVcc)?
+        );
         system::set_led(self, system::LedState::BothOn)?;
-        println!("  REF+:        {}mV", system::get_voltage(self, system::GetVoltageChannel::RefPlus)?);
-        println!("  REF-:        {}mV", system::get_voltage(self, system::GetVoltageChannel::RefMinus)?);
+        println!(
+            "  REF+:        {}mV",
+            system::get_voltage(self, system::GetVoltageChannel::RefPlus)?
+        );
+        println!(
+            "  REF-:        {}mV",
+            system::get_voltage(self, system::GetVoltageChannel::RefMinus)?
+        );
         system::set_led(self, system::LedState::RedOn)?;
-        println!("  Buffer VCC:  {}mV", system::get_voltage(self, system::GetVoltageChannel::BufferVcc)?);
-        println!("  Trig VCC:    {}mV", system::get_voltage(self, system::GetVoltageChannel::TriggerVcc)?);
+        println!(
+            "  Buffer VCC:  {}mV",
+            system::get_voltage(self, system::GetVoltageChannel::BufferVcc)?
+        );
+        println!(
+            "  Trig VCC:    {}mV",
+            system::get_voltage(self, system::GetVoltageChannel::TriggerVcc)?
+        );
         system::set_led(self, system::LedState::BothOn)?;
-        println!("  RST VCC:     {}mV", system::get_voltage(self, system::GetVoltageChannel::ResetVcc)?);
-        println!("  3.3V:        {}mV", system::get_voltage(self, system::GetVoltageChannel::V3_3)?);
+        println!(
+            "  RST VCC:     {}mV",
+            system::get_voltage(self, system::GetVoltageChannel::ResetVcc)?
+        );
+        println!(
+            "  3.3V:        {}mV",
+            system::get_voltage(self, system::GetVoltageChannel::V3_3)?
+        );
         system::set_led(self, system::LedState::RedOn)?;
-        println!("  Buffer 3.3V: {}mV", system::get_voltage(self, system::GetVoltageChannel::BufferV3_3)?);
-        println!("  5V:          {}mV", system::get_voltage(self, system::GetVoltageChannel::V5)?);
+        println!(
+            "  Buffer 3.3V: {}mV",
+            system::get_voltage(self, system::GetVoltageChannel::BufferV3_3)?
+        );
+        println!(
+            "  5V:          {}mV",
+            system::get_voltage(self, system::GetVoltageChannel::V5)?
+        );
         system::set_led(self, system::LedState::GreenOn)?;
 
         println!("\nFPGA registers:");
