@@ -99,7 +99,7 @@ struct Args {
     set_serialno: Option<String>,
 
     /// Switch FPGA voltage (1.8 or 3.3) - obsolete
-    #[arg(short = 'V', long = "set-voltage")]
+    #[arg(short = 'P', long = "set-voltage")]
     set_voltage: Option<String>,
 
     /// Set hold pin state (LOW, FLOAT, INPUT)
