@@ -14,7 +14,7 @@ pub const FPGA_REG_VENDID: u8 = 0x42;
 /// Reconfigure FPGA
 pub fn reconfig_fpga(em100: &Em100) -> Result<()> {
     let cmd = [0x20u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(&em100.interface, &cmd)?;
+    usb::send_cmd(em100, &cmd)?;
 
     // Specification says to wait 2s before issuing another USB command
     thread::sleep(Duration::from_secs(2));
@@ -24,9 +24,9 @@ pub fn reconfig_fpga(em100: &Em100) -> Result<()> {
 /// Check FPGA configuration status
 pub fn check_fpga_status(em100: &Em100) -> Result<bool> {
     let cmd = [0x21u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(&em100.interface, &cmd)?;
+    usb::send_cmd(em100, &cmd)?;
 
-    let data = usb::get_response(&em100.interface, 512)?;
+    let data = usb::get_response(em100, 512)?;
 
     if data.len() == 1 {
         Ok(data[0] == 1)
@@ -38,9 +38,9 @@ pub fn check_fpga_status(em100: &Em100) -> Result<bool> {
 /// Read FPGA register
 pub fn read_fpga_register(em100: &Em100, reg: u8) -> Result<u16> {
     let cmd = [0x22u8, reg, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(&em100.interface, &cmd)?;
+    usb::send_cmd(em100, &cmd)?;
 
-    let data = usb::get_response(&em100.interface, 3)?;
+    let data = usb::get_response(em100, 3)?;
 
     if data.len() == 3 && data[0] == 2 {
         let val = ((data[1] as u16) << 8) | (data[2] as u16);
@@ -70,7 +70,7 @@ pub fn write_fpga_register(em100: &Em100, reg: u8, val: u16) -> Result<()> {
         0,
         0,
     ];
-    usb::send_cmd(&em100.interface, &cmd)?;
+    usb::send_cmd(em100, &cmd)?;
     Ok(())
 }
 
@@ -82,7 +82,7 @@ pub fn fpga_set_voltage(em100: &Em100, voltage_code: u8) -> Result<()> {
         cmd[2] = 7;
         cmd[3] = 0x80;
     }
-    usb::send_cmd(&em100.interface, &cmd)?;
+    usb::send_cmd(em100, &cmd)?;
     Ok(())
 }
 
@@ -99,6 +99,6 @@ pub fn fpga_get_voltage(em100: &Em100) -> Result<u8> {
 /// For standalone FPGA reconfiguration with proper timing, use `reconfig_fpga`.
 pub fn fpga_reconfigure(em100: &Em100) -> Result<()> {
     let cmd = [0x20u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(&em100.interface, &cmd)?;
+    usb::send_cmd(em100, &cmd)?;
     Ok(())
 }

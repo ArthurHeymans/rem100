@@ -1,24 +1,26 @@
 //! Low-level USB communication functions
 
+use crate::device::Em100;
 use crate::error::{Error, Result};
-use futures_lite::future::block_on;
-use nusb::transfer::RequestBuffer;
-use nusb::Interface;
+use nusb::transfer::Buffer;
+use std::time::Duration;
 
-/// USB endpoint for sending commands
-const ENDPOINT_OUT: u8 = 0x01;
-/// USB endpoint for receiving responses
-const ENDPOINT_IN: u8 = 0x82;
+/// Default timeout for USB transfers
+const DEFAULT_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// Send a 16-byte command to the EM100
-pub fn send_cmd(interface: &Interface, data: &[u8]) -> Result<()> {
+pub fn send_cmd(em100: &Em100, data: &[u8]) -> Result<()> {
     let mut cmd = [0u8; 16];
     let len = std::cmp::min(data.len(), 16);
     cmd[..len].copy_from_slice(&data[..len]);
 
-    let completion = block_on(interface.bulk_out(ENDPOINT_OUT, cmd.to_vec()));
+    let buf = Buffer::from(cmd.to_vec());
+    let completion = em100
+        .endpoint_out
+        .borrow_mut()
+        .transfer_blocking(buf, DEFAULT_TIMEOUT);
     completion.status?;
-    let written = completion.data.actual_length();
+    let written = completion.actual_len;
 
     if written != 16 {
         return Err(Error::Communication(format!(
@@ -31,26 +33,38 @@ pub fn send_cmd(interface: &Interface, data: &[u8]) -> Result<()> {
 }
 
 /// Get a response from the EM100
-pub fn get_response(interface: &Interface, length: usize) -> Result<Vec<u8>> {
-    let buf = RequestBuffer::new(length);
-    let completion = block_on(interface.bulk_in(ENDPOINT_IN, buf));
+pub fn get_response(em100: &Em100, length: usize) -> Result<Vec<u8>> {
+    let mut buf = Buffer::new(length);
+    buf.set_requested_len(length);
+    let completion = em100
+        .endpoint_in
+        .borrow_mut()
+        .transfer_blocking(buf, DEFAULT_TIMEOUT);
     completion.status?;
-    Ok(completion.data)
+    Ok(completion.buffer[..completion.actual_len].to_vec())
 }
 
 /// Send a bulk transfer (for large data transfers)
-pub fn bulk_write(interface: &Interface, data: &[u8]) -> Result<usize> {
-    let completion = block_on(interface.bulk_out(ENDPOINT_OUT, data.to_vec()));
+pub fn bulk_write(em100: &Em100, data: &[u8]) -> Result<usize> {
+    let buf = Buffer::from(data.to_vec());
+    let completion = em100
+        .endpoint_out
+        .borrow_mut()
+        .transfer_blocking(buf, DEFAULT_TIMEOUT);
     completion.status?;
-    Ok(completion.data.actual_length())
+    Ok(completion.actual_len)
 }
 
 /// Receive a bulk transfer (for large data transfers)
-pub fn bulk_read(interface: &Interface, buffer: &mut [u8]) -> Result<usize> {
-    let buf = RequestBuffer::new(buffer.len());
-    let completion = block_on(interface.bulk_in(ENDPOINT_IN, buf));
+pub fn bulk_read(em100: &Em100, buffer: &mut [u8]) -> Result<usize> {
+    let mut buf = Buffer::new(buffer.len());
+    buf.set_requested_len(buffer.len());
+    let completion = em100
+        .endpoint_in
+        .borrow_mut()
+        .transfer_blocking(buf, DEFAULT_TIMEOUT);
     completion.status?;
-    let received = completion.data.len();
-    buffer[..received].copy_from_slice(&completion.data);
+    let received = completion.actual_len;
+    buffer[..received].copy_from_slice(&completion.buffer[..received]);
     Ok(received)
 }

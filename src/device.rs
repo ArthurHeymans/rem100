@@ -7,7 +7,9 @@ use crate::sdram;
 use crate::spi;
 use crate::system;
 use crate::usb;
-use nusb::Interface;
+use nusb::transfer::{Bulk, In, Out};
+use nusb::{Endpoint, MaybeFuture};
+use std::cell::RefCell;
 use std::time::Duration;
 
 /// EM100 USB Vendor ID
@@ -90,8 +92,10 @@ impl std::fmt::Display for HoldPinState {
 
 /// EM100 device structure
 pub struct Em100 {
-    /// USB interface
-    pub interface: Interface,
+    /// USB bulk OUT endpoint
+    pub endpoint_out: RefCell<Endpoint<Bulk, Out>>,
+    /// USB bulk IN endpoint
+    pub endpoint_in: RefCell<Endpoint<Bulk, In>>,
     /// MCU firmware version
     pub mcu: u16,
     /// FPGA firmware version
@@ -102,6 +106,10 @@ pub struct Em100 {
     pub hw_version: HwVersion,
 }
 
+/// USB endpoint addresses
+const ENDPOINT_OUT: u8 = 0x01;
+const ENDPOINT_IN: u8 = 0x82;
+
 impl Em100 {
     /// Open an EM100 device
     ///
@@ -109,7 +117,7 @@ impl Em100 {
     /// If serial_number is specified, opens the device with that serial number.
     /// Otherwise, opens the first EM100 device found.
     pub fn open(bus: Option<u8>, device: Option<u8>, serial_number: Option<u32>) -> Result<Self> {
-        let interface = if let (Some(bus), Some(dev)) = (bus, device) {
+        let (endpoint_out, endpoint_in) = if let (Some(bus), Some(dev)) = (bus, device) {
             // Find device by bus:device
             Self::open_by_bus_device(bus, dev)?
         } else if let Some(serial) = serial_number {
@@ -121,7 +129,8 @@ impl Em100 {
         };
 
         let mut em100 = Em100 {
-            interface,
+            endpoint_out: RefCell::new(endpoint_out),
+            endpoint_in: RefCell::new(endpoint_in),
             mcu: 0,
             fpga: 0,
             serial_no: 0,
@@ -132,22 +141,28 @@ impl Em100 {
         Ok(em100)
     }
 
-    fn open_first() -> Result<Interface> {
-        for device in nusb::list_devices()? {
+    fn open_first() -> Result<(Endpoint<Bulk, Out>, Endpoint<Bulk, In>)> {
+        for device in nusb::list_devices().wait()? {
             if device.vendor_id() == VENDOR_ID && device.product_id() == PRODUCT_ID {
-                let dev = device.open()?;
-                return Ok(dev.claim_interface(0)?);
+                let dev = device.open().wait()?;
+                let interface = dev.claim_interface(0).wait()?;
+                let endpoint_out = interface.endpoint::<Bulk, Out>(ENDPOINT_OUT)?;
+                let endpoint_in = interface.endpoint::<Bulk, In>(ENDPOINT_IN)?;
+                return Ok((endpoint_out, endpoint_in));
             }
         }
         Err(Error::DeviceNotFound)
     }
 
-    fn open_by_bus_device(bus: u8, dev: u8) -> Result<Interface> {
-        for device in nusb::list_devices()? {
-            if device.bus_number() == bus && device.device_address() == dev {
+    fn open_by_bus_device(bus: u8, dev: u8) -> Result<(Endpoint<Bulk, Out>, Endpoint<Bulk, In>)> {
+        for device in nusb::list_devices().wait()? {
+            if device.busnum() == bus && device.device_address() == dev {
                 if device.vendor_id() == VENDOR_ID && device.product_id() == PRODUCT_ID {
-                    let usb_dev = device.open()?;
-                    return Ok(usb_dev.claim_interface(0)?);
+                    let usb_dev = device.open().wait()?;
+                    let interface = usb_dev.claim_interface(0).wait()?;
+                    let endpoint_out = interface.endpoint::<Bulk, Out>(ENDPOINT_OUT)?;
+                    let endpoint_in = interface.endpoint::<Bulk, In>(ENDPOINT_IN)?;
+                    return Ok((endpoint_out, endpoint_in));
                 } else {
                     return Err(Error::InvalidArgument(format!(
                         "USB device on bus {:03}:{:02} is not an EM100pro",
@@ -159,13 +174,16 @@ impl Em100 {
         Err(Error::DeviceNotFound)
     }
 
-    fn open_by_serial(serial: u32) -> Result<Interface> {
-        for device in nusb::list_devices()? {
+    fn open_by_serial(serial: u32) -> Result<(Endpoint<Bulk, Out>, Endpoint<Bulk, In>)> {
+        for device in nusb::list_devices().wait()? {
             if device.vendor_id() == VENDOR_ID && device.product_id() == PRODUCT_ID {
-                let usb_dev = device.open()?;
-                let interface = usb_dev.claim_interface(0)?;
+                let usb_dev = device.open().wait()?;
+                let interface = usb_dev.claim_interface(0).wait()?;
+                let endpoint_out = interface.endpoint::<Bulk, Out>(ENDPOINT_OUT)?;
+                let endpoint_in = interface.endpoint::<Bulk, In>(ENDPOINT_IN)?;
                 let mut em100 = Em100 {
-                    interface,
+                    endpoint_out: RefCell::new(endpoint_out),
+                    endpoint_in: RefCell::new(endpoint_in),
                     mcu: 0,
                     fpga: 0,
                     serial_no: 0,
@@ -174,7 +192,10 @@ impl Em100 {
 
                 // Try to init and check serial
                 if em100.init().is_ok() && em100.serial_no == serial {
-                    return Ok(em100.interface);
+                    // Re-extract the endpoints (can't return from a moved em100)
+                    let endpoint_out = em100.endpoint_out.into_inner();
+                    let endpoint_in = em100.endpoint_in.into_inner();
+                    return Ok((endpoint_out, endpoint_in));
                 }
             }
         }
@@ -325,7 +346,7 @@ impl Em100 {
 
         // Send init sequence
         for entry in chip.init.iter().take(chip.init_len) {
-            usb::send_cmd(&self.interface, entry)?;
+            usb::send_cmd(self, entry)?;
         }
 
         // Set FPGA registers
@@ -346,7 +367,7 @@ impl Em100 {
             cmd[2] = 7;
             cmd[3] = 0x80;
         }
-        usb::send_cmd(&self.interface, &cmd)?;
+        usb::send_cmd(self, &cmd)?;
 
         // Must wait 2s before issuing any other USB command
         std::thread::sleep(Duration::from_secs(2));
@@ -546,12 +567,12 @@ impl Em100 {
 pub fn list_devices() -> Result<Vec<(u8, u8, String)>> {
     let mut devices = Vec::new();
 
-    for device in nusb::list_devices()? {
+    for device in nusb::list_devices().wait()? {
         if device.vendor_id() != VENDOR_ID || device.product_id() != PRODUCT_ID {
             continue;
         }
 
-        let bus = device.bus_number();
+        let bus = device.busnum();
         let addr = device.device_address();
 
         // Try to get serial number

@@ -11,7 +11,7 @@ categories = ["command-line-utilities", "hardware-support"]
 
 [dependencies]
 # USB communication (native Rust, no libusb)
-nusb = "0.1"
+nusb = "0.2"
 futures-lite = "2"
 
 # CLI argument parsing

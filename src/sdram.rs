@@ -3,17 +3,15 @@
 use crate::device::Em100;
 use crate::error::{Error, Result};
 use crate::usb;
-use futures_lite::future::block_on;
 use indicatif::{ProgressBar, ProgressStyle};
-use nusb::transfer::RequestBuffer;
+use nusb::transfer::Buffer;
+use std::time::Duration;
 
 /// Transfer chunk size (2MB)
 const TRANSFER_LENGTH: usize = 0x200000;
 
-/// USB endpoint for receiving responses
-const ENDPOINT_IN: u8 = 0x82;
-/// USB endpoint for sending data
-const ENDPOINT_OUT: u8 = 0x01;
+/// Default timeout for USB transfers
+const DEFAULT_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// Read data from SDRAM
 pub fn read_sdram(em100: &Em100, address: u32, length: usize) -> Result<Vec<u8>> {
@@ -36,7 +34,7 @@ pub fn read_sdram(em100: &Em100, address: u32, length: usize) -> Result<Vec<u8>>
         0,
     ];
 
-    usb::send_cmd(&em100.interface, &cmd)?;
+    usb::send_cmd(em100, &cmd)?;
 
     let mut data = vec![0u8; length];
     let mut bytes_read = 0;
@@ -52,12 +50,16 @@ pub fn read_sdram(em100: &Em100, address: u32, length: usize) -> Result<Vec<u8>>
     while bytes_read < length {
         let bytes_to_read = std::cmp::min(length - bytes_read, TRANSFER_LENGTH);
 
-        let buf = RequestBuffer::new(bytes_to_read);
-        let completion = block_on(em100.interface.bulk_in(ENDPOINT_IN, buf));
+        let mut buf = Buffer::new(bytes_to_read);
+        buf.set_requested_len(bytes_to_read);
+        let completion = em100
+            .endpoint_in
+            .borrow_mut()
+            .transfer_blocking(buf, DEFAULT_TIMEOUT);
         completion.status?;
-        let actual = completion.data.len();
+        let actual = completion.actual_len;
 
-        data[bytes_read..bytes_read + actual].copy_from_slice(&completion.data);
+        data[bytes_read..bytes_read + actual].copy_from_slice(&completion.buffer[..actual]);
         bytes_read += actual;
 
         pb.set_position(bytes_read as u64);
@@ -106,7 +108,7 @@ pub fn write_sdram(em100: &Em100, data: &[u8], address: u32) -> Result<()> {
         0,
     ];
 
-    usb::send_cmd(&em100.interface, &cmd)?;
+    usb::send_cmd(em100, &cmd)?;
 
     let mut bytes_sent = 0;
 
@@ -121,12 +123,13 @@ pub fn write_sdram(em100: &Em100, data: &[u8], address: u32) -> Result<()> {
     while bytes_sent < length {
         let bytes_to_send = std::cmp::min(length - bytes_sent, TRANSFER_LENGTH);
 
-        let completion = block_on(em100.interface.bulk_out(
-            ENDPOINT_OUT,
-            data[bytes_sent..bytes_sent + bytes_to_send].to_vec(),
-        ));
+        let buf = Buffer::from(data[bytes_sent..bytes_sent + bytes_to_send].to_vec());
+        let completion = em100
+            .endpoint_out
+            .borrow_mut()
+            .transfer_blocking(buf, DEFAULT_TIMEOUT);
         completion.status?;
-        let actual = completion.data.actual_length();
+        let actual = completion.actual_len;
 
         bytes_sent += actual;
 

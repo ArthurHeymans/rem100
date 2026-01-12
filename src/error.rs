@@ -15,7 +15,7 @@ pub enum Error {
     UsbTransfer(#[from] nusb::transfer::TransferError),
 
     #[error("IO error: {0}")]
-    Io(std::io::Error),
+    Io(#[from] std::io::Error),
 
     #[error("Device not found")]
     DeviceNotFound,

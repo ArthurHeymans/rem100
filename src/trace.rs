@@ -318,7 +318,7 @@ impl TraceState {
 /// Reset SPI trace buffer
 pub fn reset_spi_trace(em100: &Em100) -> Result<()> {
     let cmd = [0xbdu8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(&em100.interface, &cmd)?;
+    usb::send_cmd(em100, &cmd)?;
     Ok(())
 }
 
@@ -329,12 +329,12 @@ fn read_report_buffer(em100: &Em100) -> Result<[[u8; REPORT_BUFFER_LENGTH]; REPO
     cmd[4] = REPORT_BUFFER_COUNT as u8;
     cmd[9] = 0x15; // TraceConfig
 
-    usb::send_cmd(&em100.interface, &cmd)?;
+    usb::send_cmd(em100, &cmd)?;
 
     let mut reportdata = [[0u8; REPORT_BUFFER_LENGTH]; REPORT_BUFFER_COUNT];
 
     for report in 0..REPORT_BUFFER_COUNT {
-        let data = usb::get_response(&em100.interface, REPORT_BUFFER_LENGTH)?;
+        let data = usb::get_response(em100, REPORT_BUFFER_LENGTH)?;
         if data.len() != REPORT_BUFFER_LENGTH {
             return Err(Error::Communication(format!(
                 "Report length = {} instead of {}",

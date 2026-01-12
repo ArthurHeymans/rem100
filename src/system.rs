@@ -46,9 +46,9 @@ pub enum LedState {
 /// Returns (MCU version, FPGA version)
 pub fn get_version(em100: &Em100) -> Result<(u16, u16)> {
     let cmd = [0x10u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(&em100.interface, &cmd)?;
+    usb::send_cmd(em100, &cmd)?;
 
-    let data = usb::get_response(&em100.interface, 512)?;
+    let data = usb::get_response(em100, 512)?;
 
     if data.len() == 5 && data[0] == 4 {
         let mcu = ((data[3] as u16) << 8) | (data[4] as u16);
@@ -85,7 +85,7 @@ pub fn set_voltage(em100: &Em100, channel: SetVoltageChannel, mv: u16) -> Result
         0,
         0,
     ];
-    usb::send_cmd(&em100.interface, &cmd)?;
+    usb::send_cmd(em100, &cmd)?;
     Ok(())
 }
 
@@ -109,9 +109,9 @@ pub fn get_voltage(em100: &Em100, channel: GetVoltageChannel) -> Result<u32> {
         0,
         0,
     ];
-    usb::send_cmd(&em100.interface, &cmd)?;
+    usb::send_cmd(em100, &cmd)?;
 
-    let data = usb::get_response(&em100.interface, 512)?;
+    let data = usb::get_response(em100, 512)?;
 
     if data.len() == 3 && data[0] == 2 {
         let raw_voltage = ((data[1] as u32) << 8) | (data[2] as u32);
@@ -139,6 +139,6 @@ pub fn get_voltage(em100: &Em100, channel: GetVoltageChannel) -> Result<u32> {
 /// Set LED state
 pub fn set_led(em100: &Em100, state: LedState) -> Result<()> {
     let cmd = [0x13, state as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(&em100.interface, &cmd)?;
+    usb::send_cmd(em100, &cmd)?;
     Ok(())
 }
