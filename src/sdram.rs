@@ -13,6 +13,11 @@ const TRANSFER_LENGTH: usize = 0x200000;
 /// Default timeout for USB transfers
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(5000);
 
+/// Round up to the next multiple of max packet size for IN transfers
+fn round_up_to_max_packet(len: usize, max_packet_size: usize) -> usize {
+    len.div_ceil(max_packet_size) * max_packet_size
+}
+
 /// Read data from SDRAM
 pub fn read_sdram(em100: &Em100, address: u32, length: usize) -> Result<Vec<u8>> {
     let cmd = [
@@ -50,14 +55,14 @@ pub fn read_sdram(em100: &Em100, address: u32, length: usize) -> Result<Vec<u8>>
     while bytes_read < length {
         let bytes_to_read = std::cmp::min(length - bytes_read, TRANSFER_LENGTH);
 
-        let mut buf = Buffer::new(bytes_to_read);
-        buf.set_requested_len(bytes_to_read);
-        let completion = em100
-            .endpoint_in
-            .borrow_mut()
-            .transfer_blocking(buf, DEFAULT_TIMEOUT);
+        let mut ep = em100.endpoint_in.borrow_mut();
+        let max_packet_size = ep.max_packet_size();
+        let requested_len = round_up_to_max_packet(bytes_to_read, max_packet_size);
+        let mut buf = Buffer::new(requested_len);
+        buf.set_requested_len(requested_len);
+        let completion = ep.transfer_blocking(buf, DEFAULT_TIMEOUT);
         completion.status?;
-        let actual = completion.actual_len;
+        let actual = std::cmp::min(completion.actual_len, bytes_to_read);
 
         data[bytes_read..bytes_read + actual].copy_from_slice(&completion.buffer[..actual]);
         bytes_read += actual;
