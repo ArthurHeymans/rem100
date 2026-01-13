@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>EM100Pro Control</title>
     <link rel="stylesheet" href="/style-36c6dd2f2a281d4c.css" integrity="sha384-cwon0yknTYiBIp6aqfdtayNg6chPImxC87UKPcfXB9OkxHYK5wFYkTiuBC5agSck"/>
-<link rel="modulepreload" href="/rem100-web-82b397b120b8dfc0.js" crossorigin="anonymous" integrity="sha384-5rzIsRmFmjXwbWKSmTNb5g++uCdCNpFY1/gc+CiYF5nGYeKYFIYtqbDelCvStEDt"><link rel="preload" href="/rem100-web-82b397b120b8dfc0_bg.wasm" crossorigin="anonymous" integrity="sha384-1HZ6hCiyf7rzzUFnPvQ4RbElVUJk/nlnDKRQPu6dTvXx4qnetRRWeCjz0kDMQHal" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="/rem100-web-600bd4a3e7b04f2.js" crossorigin="anonymous" integrity="sha384-6Wz+lGXrPhcsU6SVusGEB/xI7V/Vi9Ir0cDysk9d7ASWAbPGYiX6KfI4ToUBgI91"><link rel="preload" href="/rem100-web-600bd4a3e7b04f2_bg.wasm" crossorigin="anonymous" integrity="sha384-QN8bE4o4Ey2RzSDeOBufrQ7f8TtN21Tuj0N0stA+921TckhsceUwZVG3PWaRCVR0" as="fetch" type="application/wasm"></head>
 <body>
     <div id="webusb-warning" class="webusb-warning">
         WebUSB is not supported in this browser. Please use Chrome, Edge, or Opera.
@@ -21,8 +21,8 @@
     
     
 <script type="module">
-import init, * as bindings from '/rem100-web-82b397b120b8dfc0.js';
-const wasm = await init({ module_or_path: '/rem100-web-82b397b120b8dfc0_bg.wasm' });
+import init, * as bindings from '/rem100-web-600bd4a3e7b04f2.js';
+const wasm = await init({ module_or_path: '/rem100-web-600bd4a3e7b04f2_bg.wasm' });
 
 
 window.wasmBindings = bindings;

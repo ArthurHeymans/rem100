@@ -1819,6 +1819,7 @@ checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 [[package]]
 name = "nusb"
 version = "0.2.1"
+source = "git+https://github.com/ArthurHeymans/nusb.git?branch=task%2Fwebusb-rebased#0d736b48cc6fbb5dd22fe8bedaa7dc1a436ff269"
 dependencies = [
  "atomic-waker",
  "core-foundation 0.10.1",
