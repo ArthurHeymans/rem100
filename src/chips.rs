@@ -1,6 +1,7 @@
 //! Chip configuration parsing
 
 use crate::error::{Error, Result};
+#[cfg(feature = "cli")]
 use crate::tar::TarFile;
 use byteorder::{ByteOrder, LittleEndian};
 
@@ -245,12 +246,14 @@ fn parse_srst(data: &[u8], chip: &mut ChipDesc, entries: usize) -> Result<usize>
     Ok(len)
 }
 
-/// Chip configuration database
+/// Chip configuration database (CLI version with file loading)
+#[cfg(feature = "cli")]
 pub struct ChipDatabase {
     pub configs: TarFile,
     pub version: String,
 }
 
+#[cfg(feature = "cli")]
 impl ChipDatabase {
     /// Load chip database from configs.tar.xz
     pub fn load() -> Result<Self> {
@@ -290,7 +293,54 @@ impl ChipDatabase {
     }
 }
 
+/// In-memory chip database (for web)
+#[cfg(not(feature = "cli"))]
+pub struct ChipDatabase {
+    pub chips: Vec<ChipDesc>,
+    pub version: String,
+}
+
+#[cfg(not(feature = "cli"))]
+impl ChipDatabase {
+    /// Create an empty chip database
+    ///
+    /// For now, returns an empty database. In the future, we could embed
+    /// common chip configs using include_bytes!().
+    pub fn load_embedded() -> Self {
+        Self {
+            chips: Vec::new(),
+            version: "embedded".to_string(),
+        }
+    }
+
+    /// Create chip database from in-memory data
+    pub fn from_data(chip_configs: Vec<(&str, &[u8])>, version: String) -> Result<Self> {
+        let mut chips = Vec::new();
+        for (_name, data) in chip_configs {
+            if let Ok(chip) = parse_dcfg(data) {
+                chips.push(chip);
+            }
+        }
+        Ok(Self { chips, version })
+    }
+
+    /// Find a chip by name
+    pub fn find_chip(&self, name: &str) -> Result<ChipDesc> {
+        self.chips
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
+            .cloned()
+            .ok_or_else(|| Error::InvalidChip(format!("Could not find chip '{}'", name)))
+    }
+
+    /// List all available chips
+    pub fn list_chips(&self) -> Vec<ChipDesc> {
+        self.chips.clone()
+    }
+}
+
 /// Get path to EM100 configuration file
+#[cfg(feature = "cli")]
 pub fn get_em100_file(name: &str) -> Result<std::path::PathBuf> {
     let base = if let Ok(home) = std::env::var("EM100_HOME") {
         std::path::PathBuf::from(home)

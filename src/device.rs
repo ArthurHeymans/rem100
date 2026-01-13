@@ -57,8 +57,9 @@ impl std::fmt::Display for HwVersion {
 }
 
 /// Hold pin states
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HoldPinState {
+    #[default]
     Float = 0x2,
     Low = 0x0,
     Input = 0x3,
@@ -251,7 +252,6 @@ impl Em100 {
     /// Start or stop emulation
     pub fn set_state(&self, run: bool) -> Result<()> {
         fpga::write_fpga_register(self, 0x28, if run { 1 } else { 0 })?;
-        println!("{} EM100Pro", if run { "Started" } else { "Stopped" });
         Ok(())
     }
 
@@ -270,7 +270,6 @@ impl Em100 {
             )));
         }
         fpga::write_fpga_register(self, 0x4f, if mode == 4 { 1 } else { 0 })?;
-        println!("Enabled {} byte address mode", mode);
         Ok(())
     }
 
@@ -306,14 +305,11 @@ impl Em100 {
             )));
         }
 
-        println!("Hold pin state set to {}", state);
         Ok(())
     }
 
     /// Set chip type for emulation
     pub fn set_chip_type(&mut self, chip: &ChipDesc) -> Result<()> {
-        println!("Configuring SPI flash chip emulation.");
-
         let fpga_voltage = if self.fpga & 0x8000 != 0 { 1800 } else { 3300 };
 
         // Check if we need to switch FPGA voltage
@@ -380,10 +376,6 @@ impl Em100 {
             return Ok(false);
         }
 
-        println!(
-            "Voltage set to {}",
-            if voltage_code == 18 { "1.8V" } else { "3.3V" }
-        );
         Ok(true)
     }
 
@@ -398,7 +390,6 @@ impl Em100 {
             | data[2] as u32;
 
         if old_serial == serial {
-            println!("Serial number unchanged.");
             return Ok(());
         }
 
@@ -420,17 +411,6 @@ impl Em100 {
 
         // Re-read serial number
         self.get_device_info()?;
-
-        if self.serial_no != 0xffffffff {
-            let prefix = if self.hw_version == HwVersion::Em100ProEarly {
-                "DP"
-            } else {
-                "EM"
-            };
-            println!("New serial number: {}{:06}", prefix, self.serial_no);
-        } else {
-            println!("New serial number: N.A.");
-        }
 
         Ok(())
     }
@@ -459,14 +439,15 @@ impl Em100 {
         }
     }
 
-    /// Print device information
-    pub fn print_info(&self) {
-        match self.hw_version {
+    /// Get device information as structured data
+    pub fn get_info(&self) -> DeviceInfo {
+        let mcu_version = format!("{}.{:02}", self.mcu >> 8, self.mcu & 0xff);
+
+        let fpga_version = match self.hw_version {
             HwVersion::Em100Pro | HwVersion::Em100ProEarly => {
-                println!("MCU version: {}.{:02}", self.mcu >> 8, self.mcu & 0xff);
                 if self.fpga > 0x0033 {
-                    println!(
-                        "FPGA version: {}.{:02} ({})",
+                    format!(
+                        "{}.{:02} ({})",
                         (self.fpga >> 8) & 0x7f,
                         self.fpga & 0xff,
                         if self.fpga & 0x8000 != 0 {
@@ -474,93 +455,137 @@ impl Em100 {
                         } else {
                             "3.3V"
                         }
-                    );
+                    )
                 } else {
-                    println!("FPGA version: {}.{:02}", self.fpga >> 8, self.fpga & 0xff);
+                    format!("{}.{:02}", self.fpga >> 8, self.fpga & 0xff)
                 }
             }
             HwVersion::Em100ProG2 => {
-                println!("MCU version: {}.{}", self.mcu >> 8, self.mcu & 0xff);
-                println!(
-                    "FPGA version: {}.{:03}",
-                    (self.fpga >> 8) & 0x7f,
-                    self.fpga & 0xff
-                );
+                format!("{}.{:03}", (self.fpga >> 8) & 0x7f, self.fpga & 0xff)
             }
-            _ => {
-                println!("MCU version: {}.{}", self.mcu >> 8, self.mcu & 0xff);
-                println!("FPGA version: {}.{}", self.fpga >> 8, self.fpga & 0xff);
-            }
-        }
+            _ => format!("{}.{}", self.fpga >> 8, self.fpga & 0xff),
+        };
 
-        println!("Hardware version: {:?}", self.hw_version);
-        println!("Serial number: {}", self.serial_string());
+        DeviceInfo {
+            mcu_version,
+            fpga_version,
+            hw_version: self.hw_version,
+            serial: self.serial_string(),
+            fpga_voltage: if self.fpga & 0x8000 != 0 { 1800 } else { 3300 },
+        }
     }
 
-    /// Debug mode - print voltages and FPGA registers
-    pub fn debug(&self) -> Result<()> {
-        println!("Voltages:");
+    /// Print device information (CLI convenience)
+    #[cfg(feature = "cli")]
+    pub fn print_info(&self) {
+        let info = self.get_info();
+        println!("MCU version: {}", info.mcu_version);
+        println!("FPGA version: {}", info.fpga_version);
+        println!("Hardware version: {:?}", info.hw_version);
+        println!("Serial number: {}", info.serial);
+    }
+
+    /// Get debug information (voltages and FPGA registers)
+    pub fn get_debug_info(&self) -> Result<DebugInfo> {
         system::set_led(self, system::LedState::BothOff)?;
-        println!(
-            "  1.2V:        {}mV",
-            system::get_voltage(self, system::GetVoltageChannel::V1_2)?
-        );
-        println!(
-            "  E_VCC:       {}mV",
-            system::get_voltage(self, system::GetVoltageChannel::EVcc)?
-        );
+        let v1_2 = system::get_voltage(self, system::GetVoltageChannel::V1_2)?;
+        let e_vcc = system::get_voltage(self, system::GetVoltageChannel::EVcc)?;
         system::set_led(self, system::LedState::BothOn)?;
-        println!(
-            "  REF+:        {}mV",
-            system::get_voltage(self, system::GetVoltageChannel::RefPlus)?
-        );
-        println!(
-            "  REF-:        {}mV",
-            system::get_voltage(self, system::GetVoltageChannel::RefMinus)?
-        );
+        let ref_plus = system::get_voltage(self, system::GetVoltageChannel::RefPlus)?;
+        let ref_minus = system::get_voltage(self, system::GetVoltageChannel::RefMinus)?;
         system::set_led(self, system::LedState::RedOn)?;
-        println!(
-            "  Buffer VCC:  {}mV",
-            system::get_voltage(self, system::GetVoltageChannel::BufferVcc)?
-        );
-        println!(
-            "  Trig VCC:    {}mV",
-            system::get_voltage(self, system::GetVoltageChannel::TriggerVcc)?
-        );
+        let buffer_vcc = system::get_voltage(self, system::GetVoltageChannel::BufferVcc)?;
+        let trig_vcc = system::get_voltage(self, system::GetVoltageChannel::TriggerVcc)?;
         system::set_led(self, system::LedState::BothOn)?;
-        println!(
-            "  RST VCC:     {}mV",
-            system::get_voltage(self, system::GetVoltageChannel::ResetVcc)?
-        );
-        println!(
-            "  3.3V:        {}mV",
-            system::get_voltage(self, system::GetVoltageChannel::V3_3)?
-        );
+        let rst_vcc = system::get_voltage(self, system::GetVoltageChannel::ResetVcc)?;
+        let v3_3 = system::get_voltage(self, system::GetVoltageChannel::V3_3)?;
         system::set_led(self, system::LedState::RedOn)?;
-        println!(
-            "  Buffer 3.3V: {}mV",
-            system::get_voltage(self, system::GetVoltageChannel::BufferV3_3)?
-        );
-        println!(
-            "  5V:          {}mV",
-            system::get_voltage(self, system::GetVoltageChannel::V5)?
-        );
+        let buffer_v3_3 = system::get_voltage(self, system::GetVoltageChannel::BufferV3_3)?;
+        let v5 = system::get_voltage(self, system::GetVoltageChannel::V5)?;
         system::set_led(self, system::LedState::GreenOn)?;
 
+        let mut fpga_registers = [0u16; 128];
+        for i in 0..128 {
+            fpga_registers[i] = fpga::read_fpga_register(self, (i * 2) as u8).unwrap_or(0xFFFF);
+        }
+
+        Ok(DebugInfo {
+            voltages: Voltages {
+                v1_2,
+                e_vcc,
+                ref_plus,
+                ref_minus,
+                buffer_vcc,
+                trig_vcc,
+                rst_vcc,
+                v3_3,
+                buffer_v3_3,
+                v5,
+            },
+            fpga_registers,
+        })
+    }
+
+    /// Debug mode - print voltages and FPGA registers (CLI convenience)
+    #[cfg(feature = "cli")]
+    pub fn debug(&self) -> Result<()> {
+        let info = self.get_debug_info()?;
+
+        println!("Voltages:");
+        println!("  1.2V:        {}mV", info.voltages.v1_2);
+        println!("  E_VCC:       {}mV", info.voltages.e_vcc);
+        println!("  REF+:        {}mV", info.voltages.ref_plus);
+        println!("  REF-:        {}mV", info.voltages.ref_minus);
+        println!("  Buffer VCC:  {}mV", info.voltages.buffer_vcc);
+        println!("  Trig VCC:    {}mV", info.voltages.trig_vcc);
+        println!("  RST VCC:     {}mV", info.voltages.rst_vcc);
+        println!("  3.3V:        {}mV", info.voltages.v3_3);
+        println!("  Buffer 3.3V: {}mV", info.voltages.buffer_v3_3);
+        println!("  5V:          {}mV", info.voltages.v5);
+
         println!("\nFPGA registers:");
-        for i in (0..256).step_by(2) {
-            if i % 16 == 0 {
-                print!("\n  {:04x}: ", i);
+        for i in 0..128 {
+            if i % 8 == 0 {
+                print!("\n  {:04x}: ", i * 2);
             }
-            match fpga::read_fpga_register(self, i as u8) {
-                Ok(val) => print!("{:04x} ", val),
-                Err(_) => print!("XXXX "),
-            }
+            print!("{:04x} ", info.fpga_registers[i]);
         }
         println!();
 
         Ok(())
     }
+}
+
+/// Device information structure
+#[derive(Debug, Clone)]
+pub struct DeviceInfo {
+    pub mcu_version: String,
+    pub fpga_version: String,
+    pub hw_version: HwVersion,
+    pub serial: String,
+    pub fpga_voltage: u16,
+}
+
+/// Voltage readings
+#[derive(Debug, Clone, Copy)]
+pub struct Voltages {
+    pub v1_2: u32,
+    pub e_vcc: u32,
+    pub ref_plus: u32,
+    pub ref_minus: u32,
+    pub buffer_vcc: u32,
+    pub trig_vcc: u32,
+    pub rst_vcc: u32,
+    pub v3_3: u32,
+    pub buffer_v3_3: u32,
+    pub v5: u32,
+}
+
+/// Debug information structure
+#[derive(Debug, Clone)]
+pub struct DebugInfo {
+    pub voltages: Voltages,
+    pub fpga_registers: [u16; 128],
 }
 
 /// List all connected EM100 devices

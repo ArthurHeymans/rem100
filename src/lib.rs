@@ -11,19 +11,56 @@
 //! the Free Software Foundation; version 2 of the License.
 
 pub mod chips;
-pub mod device;
-pub mod download;
 pub mod error;
-pub mod firmware;
-pub mod fpga;
 pub mod hexdump;
+
+// Image module requires device types
+#[cfg(not(target_arch = "wasm32"))]
 pub mod image;
+
+// Modules that require blocking USB operations (not available on wasm32)
+#[cfg(not(target_arch = "wasm32"))]
+pub mod device;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod firmware;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod fpga;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod sdram;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod spi;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod system;
-pub mod tar;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod trace;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod usb;
 
-pub use device::{Em100, HwVersion};
+// CLI-only modules
+#[cfg(feature = "cli")]
+pub mod download;
+#[cfg(feature = "cli")]
+pub mod tar;
+
+// Web module (native GUI only, not wasm32)
+#[cfg(all(feature = "web", not(target_arch = "wasm32")))]
+pub mod web;
+
+// Async WebUSB modules (for wasm32)
+#[cfg(target_arch = "wasm32")]
+pub mod web_device;
+#[cfg(target_arch = "wasm32")]
+pub mod web_usb;
+
+pub use chips::{parse_dcfg, ChipDatabase, ChipDesc};
 pub use error::{Error, Result};
+
+// Re-exports for native platforms only
+#[cfg(not(target_arch = "wasm32"))]
+pub use device::{list_devices, DebugInfo, DeviceInfo, Em100, HoldPinState, HwVersion, Voltages};
+#[cfg(not(target_arch = "wasm32"))]
+pub use firmware::{
+    firmware_read, firmware_to_dpfw, firmware_write, validate_firmware, FirmwareInfo,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use sdram::{read_sdram_with_progress, write_sdram_with_progress, ProgressCallback};

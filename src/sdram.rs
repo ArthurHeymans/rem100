@@ -3,7 +3,6 @@
 use crate::device::Em100;
 use crate::error::{Error, Result};
 use crate::usb;
-use indicatif::{ProgressBar, ProgressStyle};
 use nusb::transfer::Buffer;
 use std::time::Duration;
 
@@ -18,8 +17,17 @@ fn round_up_to_max_packet(len: usize, max_packet_size: usize) -> usize {
     len.div_ceil(max_packet_size) * max_packet_size
 }
 
-/// Read data from SDRAM
-pub fn read_sdram(em100: &Em100, address: u32, length: usize) -> Result<Vec<u8>> {
+/// Progress callback type for reporting transfer progress
+/// Arguments: (bytes_transferred, total_bytes)
+pub type ProgressCallback<'a> = Option<&'a mut dyn FnMut(usize, usize)>;
+
+/// Read data from SDRAM with optional progress callback
+pub fn read_sdram_with_progress(
+    em100: &Em100,
+    address: u32,
+    length: usize,
+    mut progress: ProgressCallback,
+) -> Result<Vec<u8>> {
     let cmd = [
         0x41u8,
         ((address >> 24) & 0xff) as u8,
@@ -44,14 +52,6 @@ pub fn read_sdram(em100: &Em100, address: u32, length: usize) -> Result<Vec<u8>>
     let mut data = vec![0u8; length];
     let mut bytes_read = 0;
 
-    let pb = ProgressBar::new(length as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
-            .unwrap()
-            .progress_chars("#>-"),
-    );
-
     while bytes_read < length {
         let bytes_to_read = std::cmp::min(length - bytes_read, TRANSFER_LENGTH);
 
@@ -67,18 +67,14 @@ pub fn read_sdram(em100: &Em100, address: u32, length: usize) -> Result<Vec<u8>>
         data[bytes_read..bytes_read + actual].copy_from_slice(&completion.buffer[..actual]);
         bytes_read += actual;
 
-        pb.set_position(bytes_read as u64);
+        if let Some(ref mut cb) = progress {
+            cb(bytes_read, length);
+        }
 
         if actual < bytes_to_read {
-            pb.abandon_with_message(format!(
-                "Warning: tried reading {} bytes, got {}",
-                bytes_to_read, actual
-            ));
             break;
         }
     }
-
-    pb.finish_with_message("Read complete");
 
     if bytes_read != length {
         return Err(Error::Communication(format!(
@@ -90,8 +86,49 @@ pub fn read_sdram(em100: &Em100, address: u32, length: usize) -> Result<Vec<u8>>
     Ok(data)
 }
 
-/// Write data to SDRAM
-pub fn write_sdram(em100: &Em100, data: &[u8], address: u32) -> Result<()> {
+/// Read data from SDRAM (convenience wrapper with CLI progress bar)
+#[cfg(feature = "cli")]
+pub fn read_sdram(em100: &Em100, address: u32, length: usize) -> Result<Vec<u8>> {
+    use indicatif::{ProgressBar, ProgressStyle};
+
+    let pb = ProgressBar::new(length as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
+            .unwrap()
+            .progress_chars("#>-"),
+    );
+
+    let result = read_sdram_with_progress(
+        em100,
+        address,
+        length,
+        Some(&mut |bytes_read, _total| {
+            pb.set_position(bytes_read as u64);
+        }),
+    );
+
+    match &result {
+        Ok(_) => pb.finish_with_message("Read complete"),
+        Err(_) => pb.abandon_with_message("Read failed"),
+    }
+
+    result
+}
+
+/// Read data from SDRAM (no progress display)
+#[cfg(not(feature = "cli"))]
+pub fn read_sdram(em100: &Em100, address: u32, length: usize) -> Result<Vec<u8>> {
+    read_sdram_with_progress(em100, address, length, None)
+}
+
+/// Write data to SDRAM with optional progress callback
+pub fn write_sdram_with_progress(
+    em100: &Em100,
+    data: &[u8],
+    address: u32,
+    mut progress: ProgressCallback,
+) -> Result<()> {
     let length = data.len();
 
     let cmd = [
@@ -117,14 +154,6 @@ pub fn write_sdram(em100: &Em100, data: &[u8], address: u32) -> Result<()> {
 
     let mut bytes_sent = 0;
 
-    let pb = ProgressBar::new(length as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
-            .unwrap()
-            .progress_chars("#>-"),
-    );
-
     while bytes_sent < length {
         let bytes_to_send = std::cmp::min(length - bytes_sent, TRANSFER_LENGTH);
 
@@ -138,21 +167,16 @@ pub fn write_sdram(em100: &Em100, data: &[u8], address: u32) -> Result<()> {
 
         bytes_sent += actual;
 
-        pb.set_position(bytes_sent as u64);
+        if let Some(ref mut cb) = progress {
+            cb(bytes_sent, length);
+        }
 
         if actual < bytes_to_send {
-            pb.abandon_with_message(format!(
-                "Warning: tried sending {} bytes, sent {}",
-                bytes_to_send, actual
-            ));
             break;
         }
     }
 
-    if bytes_sent == length {
-        pb.finish_with_message("Transfer complete");
-    } else {
-        pb.abandon_with_message("Transfer failed");
+    if bytes_sent != length {
         return Err(Error::Communication(format!(
             "SDRAM write failed: sent {} of {} bytes",
             bytes_sent, length
@@ -160,4 +184,41 @@ pub fn write_sdram(em100: &Em100, data: &[u8], address: u32) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Write data to SDRAM (convenience wrapper with CLI progress bar)
+#[cfg(feature = "cli")]
+pub fn write_sdram(em100: &Em100, data: &[u8], address: u32) -> Result<()> {
+    use indicatif::{ProgressBar, ProgressStyle};
+
+    let length = data.len();
+    let pb = ProgressBar::new(length as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
+            .unwrap()
+            .progress_chars("#>-"),
+    );
+
+    let result = write_sdram_with_progress(
+        em100,
+        data,
+        address,
+        Some(&mut |bytes_sent, _total| {
+            pb.set_position(bytes_sent as u64);
+        }),
+    );
+
+    match &result {
+        Ok(_) => pb.finish_with_message("Transfer complete"),
+        Err(_) => pb.abandon_with_message("Transfer failed"),
+    }
+
+    result
+}
+
+/// Write data to SDRAM (no progress display)
+#[cfg(not(feature = "cli"))]
+pub fn write_sdram(em100: &Em100, data: &[u8], address: u32) -> Result<()> {
+    write_sdram_with_progress(em100, data, address, None)
 }

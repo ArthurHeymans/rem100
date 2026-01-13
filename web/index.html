@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>EM100Pro Control</title>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #1a1a1a;
+        }
+        
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            color: #ffffff;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        
+        #loading h1 {
+            margin-bottom: 20px;
+        }
+        
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 3px solid #333;
+            border-top-color: #3498db;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        #em100_canvas {
+            width: 100%;
+            height: 100%;
+        }
+        
+        .webusb-warning {
+            background-color: #ff6b6b;
+            color: white;
+            padding: 10px 20px;
+            text-align: center;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 1000;
+            display: none;
+        }
+        
+        .webusb-warning.show {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div id="webusb-warning" class="webusb-warning">
+        WebUSB is not supported in this browser. Please use Chrome, Edge, or Opera.
+    </div>
+    
+    <div id="loading">
+        <h1>EM100Pro Control</h1>
+        <div class="spinner"></div>
+        <p>Loading WebAssembly...</p>
+    </div>
+    
+    <canvas id="em100_canvas"></canvas>
+    
+    <script type="module">
+        // Check for WebUSB support
+        if (!navigator.usb) {
+            document.getElementById('webusb-warning').classList.add('show');
+        }
+        
+        // Load the WASM module
+        import init from './rem100_web.js';
+        
+        async function run() {
+            try {
+                await init();
+                // Hide loading screen
+                document.getElementById('loading').style.display = 'none';
+            } catch (e) {
+                document.getElementById('loading').innerHTML = `
+                    <h1>Error Loading Application</h1>
+                    <p style="color: #ff6b6b;">${e}</p>
+                    <p>Please ensure you're using a modern browser with WebAssembly support.</p>
+                `;
+            }
+        }
+        
+        run();
+    </script>
+</body>
+</html>
