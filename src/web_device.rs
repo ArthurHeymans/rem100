@@ -362,6 +362,17 @@ impl Em100Async {
     pub async fn set_state(&mut self, run: bool) -> Result<()> {
         self.write_fpga_register(0x28, if run { 1 } else { 0 })
             .await?;
+
+        // Verify the state was actually set (read back and check)
+        let actual_state = self.get_state().await?;
+        if actual_state != run {
+            return Err(Error::OperationFailed(format!(
+                "Failed to {} emulation. Device reports: {}",
+                if run { "start" } else { "stop" },
+                if actual_state { "running" } else { "stopped" }
+            )));
+        }
+
         Ok(())
     }
 
@@ -421,6 +432,10 @@ impl Em100Async {
 
     /// Set chip type for emulation
     pub async fn set_chip_type(&mut self, chip: &ChipDesc) -> Result<()> {
+        // Stop emulation before changing chip type (matches CLI behavior)
+        // Use write_fpga_register directly to avoid verification during chip setup
+        self.write_fpga_register(0x28, 0).await?;
+
         let fpga_voltage = if self.fpga & 0x8000 != 0 { 1800 } else { 3300 };
 
         // Check if we need to switch FPGA voltage
@@ -460,6 +475,12 @@ impl Em100Async {
         self.write_fpga_register(0xc4, 0x01).await?;
         self.write_fpga_register(0x10, 0x00).await?;
         self.write_fpga_register(0x81, 0x00).await?;
+
+        // Auto-enable 4-byte address mode for large chips (>16MB)
+        // This matches CLI behavior in main.rs
+        if chip.size > 16 * 1024 * 1024 {
+            self.set_address_mode(4).await?;
+        }
 
         Ok(())
     }
@@ -520,9 +541,9 @@ impl Em100Async {
             let chunk_len = std::cmp::min(CHUNK_SIZE, data.len() - offset);
             let chunk_addr = address + offset as u32;
 
-            // Send write command
+            // Send write command (0x40 = write to SDRAM)
             let cmd = [
-                0x41u8,
+                0x40u8,
                 (chunk_addr >> 24) as u8,
                 (chunk_addr >> 16) as u8,
                 (chunk_addr >> 8) as u8,
@@ -562,9 +583,9 @@ impl Em100Async {
             let chunk_len = std::cmp::min(CHUNK_SIZE, length - offset);
             let chunk_addr = address + offset as u32;
 
-            // Send read command
+            // Send read command (0x41 = read from SDRAM)
             let cmd = [
-                0x40u8,
+                0x41u8,
                 (chunk_addr >> 24) as u8,
                 (chunk_addr >> 16) as u8,
                 (chunk_addr >> 8) as u8,

@@ -300,15 +300,28 @@ pub struct ChipDatabase {
     pub version: String,
 }
 
+// Include the generated chip data at module level
+#[cfg(not(feature = "cli"))]
+include!(concat!(env!("OUT_DIR"), "/chip_data.rs"));
+
 #[cfg(not(feature = "cli"))]
 impl ChipDatabase {
-    /// Create an empty chip database
+    /// Load chip database from embedded data
     ///
-    /// For now, returns an empty database. In the future, we could embed
-    /// common chip configs using include_bytes!().
+    /// Chip configurations are embedded at build time from configs.tar.xz
     pub fn load_embedded() -> Self {
+        let mut chips = Vec::new();
+        for (_name, data) in EMBEDDED_CHIP_CONFIGS {
+            if let Ok(chip) = parse_dcfg(data) {
+                chips.push(chip);
+            }
+        }
+
+        // Sort chips by vendor and name for better UX
+        chips.sort_by(|a, b| a.vendor.cmp(&b.vendor).then(a.name.cmp(&b.name)));
+
         Self {
-            chips: Vec::new(),
+            chips,
             version: "embedded".to_string(),
         }
     }

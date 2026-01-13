@@ -70,9 +70,16 @@ enum Panel {
 impl Em100App {
     /// Create a new application instance
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        // Load chip database
+        let chip_db = crate::chips::ChipDatabase::load_embedded();
+        let available_chips = chip_db.list_chips();
+        let chip_db_version = chip_db.version.clone();
+
         Self {
             address_mode: 3,
             start_address: "0".to_string(),
+            available_chips,
+            chip_db_version,
             ..Default::default()
         }
     }
@@ -440,6 +447,54 @@ impl Em100App {
                     }
                 }
             }
+
+            ui.add_space(8.0);
+
+            // Chip selection
+            let mut chip_to_set: Option<ChipDesc> = None;
+            ui.horizontal(|ui| {
+                ui.label("Chip:");
+                let selected_text = if let Some(ref chip) = self.selected_chip {
+                    format!("{} {} ({} bytes)", chip.vendor, chip.name, chip.size)
+                } else {
+                    "None selected".to_string()
+                };
+
+                egui::ComboBox::from_id_salt("chip_selector")
+                    .width(300.0)
+                    .selected_text(selected_text)
+                    .show_ui(ui, |ui| {
+                        // Add search filter
+                        ui.text_edit_singleline(&mut self.chip_search);
+                        ui.separator();
+
+                        // Filter and display chips
+                        let search_lower = self.chip_search.to_lowercase();
+                        egui::ScrollArea::vertical()
+                            .max_height(300.0)
+                            .show(ui, |ui| {
+                                for chip in &self.available_chips {
+                                    let chip_name = format!("{} {}", chip.vendor, chip.name);
+                                    if search_lower.is_empty()
+                                        || chip_name.to_lowercase().contains(&search_lower)
+                                    {
+                                        let is_selected = self
+                                            .selected_chip
+                                            .as_ref()
+                                            .map(|c| c.name == chip.name && c.vendor == chip.vendor)
+                                            .unwrap_or(false);
+                                        if ui.selectable_label(is_selected, &chip_name).clicked() {
+                                            chip_to_set = Some(chip.clone());
+                                        }
+                                    }
+                                }
+                            });
+                    });
+            });
+
+            if let Some(chip) = chip_to_set {
+                self.set_chip(chip);
+            }
         }
     }
 
@@ -453,59 +508,6 @@ impl Em100App {
             return;
         }
 
-        // Chip selection
-        ui.horizontal(|ui| {
-            ui.label("Chip:");
-            if let Some(ref chip) = self.selected_chip {
-                ui.label(format!(
-                    "{} {} ({} bytes)",
-                    chip.vendor, chip.name, chip.size
-                ));
-            } else {
-                ui.label("None selected");
-            }
-        });
-
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.label("Search:");
-            ui.text_edit_singleline(&mut self.chip_search);
-        });
-
-        // Chip list (filtered) - collect first to avoid borrow issues
-        let search_lower = self.chip_search.to_lowercase();
-        let filtered_chips: Vec<_> = self
-            .available_chips
-            .iter()
-            .filter(|chip| {
-                let name = format!("{} {}", chip.vendor, chip.name);
-                search_lower.is_empty() || name.to_lowercase().contains(&search_lower)
-            })
-            .cloned()
-            .collect();
-
-        let mut chip_to_set: Option<ChipDesc> = None;
-        egui::ScrollArea::vertical()
-            .max_height(150.0)
-            .show(ui, |ui| {
-                for chip in &filtered_chips {
-                    let name = format!("{} {}", chip.vendor, chip.name);
-                    let is_selected = self
-                        .selected_chip
-                        .as_ref()
-                        .map(|c| c.name == chip.name)
-                        .unwrap_or(false);
-                    if ui.selectable_label(is_selected, &name).clicked() {
-                        chip_to_set = Some(chip.clone());
-                    }
-                }
-            });
-
-        if let Some(chip) = chip_to_set {
-            self.set_chip(chip);
-        }
-
-        ui.add_space(16.0);
         ui.separator();
 
         // Download section

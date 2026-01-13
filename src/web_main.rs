@@ -16,7 +16,16 @@ mod wasm_app {
     use rem100::web_device::{DeviceInfo, Em100Async, HoldPinState};
     use std::cell::RefCell;
     use std::rc::Rc;
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::spawn_local;
+    use web_sys::HtmlInputElement;
+
+    /// Chip info with cached display name
+    struct ChipInfo {
+        chip: Rc<ChipDesc>,
+        display_name: String,
+    }
 
     /// Connection state for async device operations
     #[derive(Default)]
@@ -49,6 +58,7 @@ mod wasm_app {
         progress: f32,
         progress_message: String,
         upload_data: Option<Vec<u8>>,
+        pending_file: Option<(String, Vec<u8>)>, // (filename, data) from file picker
     }
 
     impl Default for SharedState {
@@ -63,6 +73,7 @@ mod wasm_app {
                 progress: 0.0,
                 progress_message: String::new(),
                 upload_data: None,
+                pending_file: None,
             }
         }
     }
@@ -71,10 +82,10 @@ mod wasm_app {
     pub struct Em100WebApp {
         /// Shared state for async operations
         state: Rc<RefCell<SharedState>>,
-        /// Available chips
-        available_chips: Vec<ChipDesc>,
+        /// Available chips with cached display names
+        available_chips: Vec<ChipInfo>,
         /// Selected chip
-        selected_chip: Option<ChipDesc>,
+        selected_chip: Option<Rc<ChipDesc>>,
         /// Chip search query
         chip_search: String,
         /// Download data
@@ -105,7 +116,19 @@ mod wasm_app {
         pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
             // Load chip database
             let chip_db = ChipDatabase::load_embedded();
-            let available_chips = chip_db.chips;
+
+            // Wrap chips in Rc and pre-compute display names
+            let available_chips: Vec<ChipInfo> = chip_db
+                .chips
+                .into_iter()
+                .map(|chip| {
+                    let display_name = format!("{} {}", chip.vendor, chip.name);
+                    ChipInfo {
+                        chip: Rc::new(chip),
+                        display_name,
+                    }
+                })
+                .collect();
 
             Self {
                 state: Rc::new(RefCell::new(SharedState::default())),
@@ -251,28 +274,41 @@ mod wasm_app {
             });
         }
 
-        fn set_chip(&mut self, chip: ChipDesc) {
+        fn set_chip(&mut self, chip: Rc<ChipDesc>) {
             let state = self.state.clone();
-            let chip_clone = chip.clone();
+            let chip_for_async = chip.clone();
             state.borrow_mut().async_op =
                 AsyncOp::InProgress(format!("Setting chip to {} {}...", chip.vendor, chip.name));
 
             spawn_local(async move {
-                let result = {
+                // Take device out of state to avoid holding borrow across await
+                let device = {
                     let mut s = state.borrow_mut();
-                    if let Some(ref mut device) = s.device {
-                        Some(device.set_chip_type(&chip_clone).await)
-                    } else {
-                        None
-                    }
+                    s.device.take()
                 };
 
+                let (result, device) = if let Some(mut dev) = device {
+                    let res = dev.set_chip_type(&*chip_for_async).await;
+                    (Some(res), Some(dev))
+                } else {
+                    (None, None)
+                };
+
+                // Put device back and update state
                 let mut s = state.borrow_mut();
+                s.device = device;
                 match result {
                     Some(Ok(_)) => {
+                        // set_chip_type stops emulation, so update is_running
+                        s.is_running = false;
+                        let mode_msg = if chip_for_async.size > 16 * 1024 * 1024 {
+                            " (4-byte address mode enabled)"
+                        } else {
+                            ""
+                        };
                         s.async_op = AsyncOp::Success(format!(
-                            "Chip set to {} {}",
-                            chip_clone.vendor, chip_clone.name
+                            "Chip set to {} {}{}",
+                            chip_for_async.vendor, chip_for_async.name, mode_msg
                         ));
                     }
                     Some(Err(e)) => {
@@ -285,6 +321,54 @@ mod wasm_app {
             });
 
             self.selected_chip = Some(chip);
+        }
+
+        fn select_file(&mut self) {
+            let state = self.state.clone();
+
+            // Create a file input element
+            let window = web_sys::window().expect("no window");
+            let document = window.document().expect("no document");
+            let input: HtmlInputElement = document
+                .create_element("input")
+                .expect("failed to create input")
+                .dyn_into()
+                .expect("not an input element");
+
+            input.set_type("file");
+            input.set_accept(".bin,.rom,.img,*");
+
+            // Set up event handler for file selection
+            let onchange = Closure::wrap(Box::new(move |event: web_sys::Event| {
+                let input: HtmlInputElement = event.target().unwrap().dyn_into().unwrap();
+                if let Some(files) = input.files() {
+                    if let Some(file) = files.get(0) {
+                        let filename = file.name();
+                        let state = state.clone();
+
+                        spawn_local(async move {
+                            // Read file as array buffer
+                            let array_buffer =
+                                wasm_bindgen_futures::JsFuture::from(file.array_buffer())
+                                    .await
+                                    .expect("failed to read file");
+
+                            let uint8_array = js_sys::Uint8Array::new(&array_buffer);
+                            let data = uint8_array.to_vec();
+
+                            let mut s = state.borrow_mut();
+                            s.pending_file = Some((filename, data));
+                            s.async_op = AsyncOp::Success("File loaded".to_string());
+                        });
+                    }
+                }
+            }) as Box<dyn FnMut(_)>);
+
+            input.set_onchange(Some(onchange.as_ref().unchecked_ref()));
+            onchange.forget(); // Keep the closure alive
+
+            // Trigger the file dialog
+            input.click();
         }
 
         fn download_to_device(&mut self) {
@@ -304,16 +388,22 @@ mod wasm_app {
             }
 
             spawn_local(async move {
-                let result = {
+                // Take device out of state to avoid holding borrow across await
+                let device = {
                     let mut s = state.borrow_mut();
-                    if let Some(ref mut device) = s.device {
-                        Some(device.download(&data, start_addr).await)
-                    } else {
-                        None
-                    }
+                    s.device.take()
                 };
 
+                let (result, device) = if let Some(mut dev) = device {
+                    let res = dev.download(&data, start_addr).await;
+                    (Some(res), Some(dev))
+                } else {
+                    (None, None)
+                };
+
+                // Put device back and update state
                 let mut s = state.borrow_mut();
+                s.device = device;
                 s.progress = 1.0;
                 match result {
                     Some(Ok(_)) => {
@@ -346,16 +436,22 @@ mod wasm_app {
             }
 
             spawn_local(async move {
-                let result = {
+                // Take device out of state to avoid holding borrow across await
+                let device = {
                     let mut s = state.borrow_mut();
-                    if let Some(ref mut device) = s.device {
-                        Some(device.upload(0, size).await)
-                    } else {
-                        None
-                    }
+                    s.device.take()
                 };
 
+                let (result, device) = if let Some(mut dev) = device {
+                    let res = dev.upload(0, size).await;
+                    (Some(res), Some(dev))
+                } else {
+                    (None, None)
+                };
+
+                // Put device back and update state
                 let mut s = state.borrow_mut();
+                s.device = device;
                 s.progress = 1.0;
                 match result {
                     Some(Ok(data)) => {
@@ -531,6 +627,65 @@ mod wasm_app {
                         // TODO: Send to device
                     }
                 });
+
+                ui.add_space(8.0);
+
+                // Chip selection
+                ui.label("Chip:");
+
+                // Search box above ComboBox
+                ui.horizontal(|ui| {
+                    ui.label("Search:");
+                    ui.text_edit_singleline(&mut self.chip_search);
+                });
+
+                let mut chip_to_set: Option<Rc<ChipDesc>> = None;
+                ui.horizontal(|ui| {
+                    let selected_text = if let Some(ref chip) = self.selected_chip {
+                        format!("{} {} ({} bytes)", chip.vendor, chip.name, chip.size)
+                    } else {
+                        "Select chip...".to_string()
+                    };
+
+                    egui::ComboBox::from_id_salt("chip_selector")
+                        .width(400.0)
+                        .selected_text(selected_text)
+                        .show_ui(ui, |ui| {
+                            // Filter and display chips using pre-computed names
+                            let search_lower = self.chip_search.to_lowercase();
+                            egui::ScrollArea::vertical()
+                                .max_height(400.0)
+                                .show(ui, |ui| {
+                                    for chip_info in &self.available_chips {
+                                        if search_lower.is_empty()
+                                            || chip_info
+                                                .display_name
+                                                .to_lowercase()
+                                                .contains(&search_lower)
+                                        {
+                                            let is_selected = self
+                                                .selected_chip
+                                                .as_ref()
+                                                .map(|c| Rc::ptr_eq(c, &chip_info.chip))
+                                                .unwrap_or(false);
+                                            if ui
+                                                .selectable_label(
+                                                    is_selected,
+                                                    &chip_info.display_name,
+                                                )
+                                                .clicked()
+                                            {
+                                                chip_to_set = Some(Rc::clone(&chip_info.chip));
+                                            }
+                                        }
+                                    }
+                                });
+                        });
+                });
+
+                if let Some(chip) = chip_to_set {
+                    self.set_chip(chip);
+                }
             }
         }
 
@@ -551,67 +706,20 @@ mod wasm_app {
                 return;
             }
 
-            // Chip selection
-            ui.horizontal(|ui| {
-                ui.label("Chip:");
-                if let Some(ref chip) = self.selected_chip {
-                    ui.label(format!(
-                        "{} {} ({} bytes)",
-                        chip.vendor, chip.name, chip.size
-                    ));
-                } else {
-                    ui.label("None selected");
-                }
-            });
-
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.label("Search:");
-                ui.text_edit_singleline(&mut self.chip_search);
-            });
-
-            // Chip list (filtered)
-            let search_lower = self.chip_search.to_lowercase();
-            let filtered_chips: Vec<_> = self
-                .available_chips
-                .iter()
-                .filter(|chip| {
-                    let name = format!("{} {}", chip.vendor, chip.name);
-                    search_lower.is_empty() || name.to_lowercase().contains(&search_lower)
-                })
-                .cloned()
-                .collect();
-
-            let mut chip_to_set: Option<ChipDesc> = None;
-            egui::ScrollArea::vertical()
-                .max_height(150.0)
-                .show(ui, |ui| {
-                    for chip in &filtered_chips {
-                        let name = format!("{} {}", chip.vendor, chip.name);
-                        let is_selected = self
-                            .selected_chip
-                            .as_ref()
-                            .map(|c| c.name == chip.name)
-                            .unwrap_or(false);
-                        if ui.selectable_label(is_selected, &name).clicked() {
-                            chip_to_set = Some(chip.clone());
-                        }
-                    }
-                });
-
-            if let Some(chip) = chip_to_set {
-                self.set_chip(chip);
-            }
-
-            ui.add_space(16.0);
             ui.separator();
 
             // Download section
             ui.heading("Download to Device");
             ui.horizontal(|ui| {
-                ui.label("File:");
-                ui.label(&self.download_filename);
-                ui.label("(Drag & drop file onto window)");
+                if ui.button("Select File...").clicked() {
+                    self.select_file();
+                }
+                if !self.download_filename.is_empty() {
+                    ui.label(&self.download_filename);
+                    if let Some(ref data) = self.download_data {
+                        ui.label(format!("({} bytes)", data.len()));
+                    }
+                }
             });
 
             ui.horizontal(|ui| {
@@ -671,6 +779,16 @@ mod wasm_app {
 
     impl eframe::App for Em100WebApp {
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+            // Check for pending file from file picker
+            if let Ok(mut state) = self.state.try_borrow_mut() {
+                if let Some((filename, data)) = state.pending_file.take() {
+                    self.status_message = format!("Loaded {} ({} bytes)", filename, data.len());
+                    self.status_is_error = false;
+                    self.download_filename = filename;
+                    self.download_data = Some(data);
+                }
+            }
+
             // Update status from async operations
             {
                 let state = self.state.borrow();

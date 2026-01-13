@@ -17,9 +17,9 @@ ignore = ["target", "dist"]
 # The address to serve on
 address = "127.0.0.1"
 # The port to serve on
-port = 8080
+port = 8081
 # Open browser automatically
-open = true
+open = false
 
 [[hooks]]
 stage = "pre_build"

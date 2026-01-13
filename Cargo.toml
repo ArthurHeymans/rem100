@@ -106,3 +106,8 @@ lto = true
 inherits = "release"
 opt-level = "s"
 lto = true
+
+[build-dependencies]
+xz2 = "0.1"
+tar = "0.4"
+byteorder = "1"
