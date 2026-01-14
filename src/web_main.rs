@@ -686,6 +686,67 @@ mod wasm_app {
                 if let Some(chip) = chip_to_set {
                     self.set_chip(chip);
                 }
+
+                // Memory operations section
+                ui.add_space(16.0);
+                ui.separator();
+                ui.heading("Memory");
+
+                // Get progress state
+                let state = self.state.borrow();
+                let progress = state.progress;
+                let progress_message = state.progress_message.clone();
+                let upload_data_len = state.upload_data.as_ref().map(|d| d.len());
+                drop(state);
+
+                // Download to Device
+                ui.label("Download to Device:");
+                ui.horizontal(|ui| {
+                    if ui.button("Select File...").clicked() {
+                        self.select_file();
+                    }
+                    if !self.download_filename.is_empty() {
+                        ui.label(&self.download_filename);
+                        if let Some(ref data) = self.download_data {
+                            ui.label(format!("({} bytes)", data.len()));
+                        }
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Start Address:");
+                    ui.text_edit_singleline(&mut self.start_address);
+                });
+
+                ui.horizontal(|ui| {
+                    let can_download = self.download_data.is_some();
+                    if ui
+                        .add_enabled(can_download, egui::Button::new("Download"))
+                        .clicked()
+                    {
+                        self.download_to_device();
+                    }
+                });
+
+                ui.add_space(8.0);
+
+                // Upload from Device
+                ui.label("Upload from Device:");
+                ui.horizontal(|ui| {
+                    if ui.button("Upload").clicked() {
+                        self.upload_from_device();
+                    }
+                    if let Some(len) = upload_data_len {
+                        ui.label(format!("{} bytes", len));
+                        // TODO: Add save button that downloads via JS blob
+                    }
+                });
+
+                // Progress bar
+                if progress > 0.0 && progress < 1.0 {
+                    ui.add_space(8.0);
+                    ui.add(egui::ProgressBar::new(progress).text(&progress_message));
+                }
             }
         }
 
@@ -696,9 +757,6 @@ mod wasm_app {
 
             let state = self.state.borrow();
             let is_connected = matches!(state.connection_state, ConnectionState::Connected);
-            let progress = state.progress;
-            let progress_message = state.progress_message.clone();
-            let upload_data_len = state.upload_data.as_ref().map(|d| d.len());
             drop(state);
 
             if !is_connected {
@@ -706,57 +764,7 @@ mod wasm_app {
                 return;
             }
 
-            ui.separator();
-
-            // Download section
-            ui.heading("Download to Device");
-            ui.horizontal(|ui| {
-                if ui.button("Select File...").clicked() {
-                    self.select_file();
-                }
-                if !self.download_filename.is_empty() {
-                    ui.label(&self.download_filename);
-                    if let Some(ref data) = self.download_data {
-                        ui.label(format!("({} bytes)", data.len()));
-                    }
-                }
-            });
-
-            ui.horizontal(|ui| {
-                ui.label("Start Address:");
-                ui.text_edit_singleline(&mut self.start_address);
-            });
-
-            ui.horizontal(|ui| {
-                let can_download = self.download_data.is_some();
-                if ui
-                    .add_enabled(can_download, egui::Button::new("Download"))
-                    .clicked()
-                {
-                    self.download_to_device();
-                }
-            });
-
-            ui.add_space(16.0);
-            ui.separator();
-
-            // Upload section
-            ui.heading("Upload from Device");
-            ui.horizontal(|ui| {
-                if ui.button("Upload").clicked() {
-                    self.upload_from_device();
-                }
-                if let Some(len) = upload_data_len {
-                    ui.label(format!("{} bytes", len));
-                    // TODO: Add save button that downloads via JS blob
-                }
-            });
-
-            // Progress bar
-            if progress > 0.0 && progress < 1.0 {
-                ui.add_space(8.0);
-                ui.add(egui::ProgressBar::new(progress).text(&progress_message));
-            }
+            ui.label("Memory operations are available in the Device panel under Control.");
         }
 
         /// Render debug panel
@@ -816,7 +824,6 @@ mod wasm_app {
                     ui.separator();
 
                     ui.selectable_value(&mut self.current_panel, Panel::Device, "Device");
-                    ui.selectable_value(&mut self.current_panel, Panel::Memory, "Memory");
                     ui.selectable_value(&mut self.current_panel, Panel::Debug, "Debug");
                 });
             });
