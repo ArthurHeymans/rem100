@@ -39,7 +39,17 @@ The binary will be available at `target/release/rem100`.
 
 ### Web Interface
 
-A WebUSB-based web interface is also available:
+A GUI interface is available in two variants:
+
+#### Native Desktop GUI
+
+```bash
+cargo run --features web --no-default-features --bin rem100-web
+```
+
+#### Web (WASM) Interface
+
+A WebUSB-based web interface using egui/eframe:
 
 ```bash
 # Install trunk (if not already installed)
@@ -52,6 +62,8 @@ trunk serve
 Then open http://127.0.0.1:8080 in Chrome or Edge (WebUSB is not supported in Firefox).
 
 **Note:** The Linux udev rules above are also required for the web interface.
+
+For detailed web interface documentation including architecture, feature flags, and development setup, see [README-web.md](README-web.md).
 
 ## Usage
 

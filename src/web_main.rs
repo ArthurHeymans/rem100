@@ -633,55 +633,71 @@ mod wasm_app {
                 // Chip selection
                 ui.label("Chip:");
 
-                // Search box above ComboBox
-                ui.horizontal(|ui| {
-                    ui.label("Search:");
-                    ui.text_edit_singleline(&mut self.chip_search);
-                });
-
                 let mut chip_to_set: Option<Rc<ChipDesc>> = None;
-                ui.horizontal(|ui| {
-                    let selected_text = if let Some(ref chip) = self.selected_chip {
-                        format!("{} {} ({} bytes)", chip.vendor, chip.name, chip.size)
-                    } else {
-                        "Select chip...".to_string()
-                    };
+                let popup_id = ui.make_persistent_id("chip_selector_popup");
+                let selected_text = if let Some(ref chip) = self.selected_chip {
+                    format!("{} {} ({} bytes)", chip.vendor, chip.name, chip.size)
+                } else {
+                    "Select chip...".to_string()
+                };
 
-                    egui::ComboBox::from_id_salt("chip_selector")
-                        .width(400.0)
-                        .selected_text(selected_text)
-                        .show_ui(ui, |ui| {
-                            // Filter and display chips using pre-computed names
-                            let search_lower = self.chip_search.to_lowercase();
-                            egui::ScrollArea::vertical()
-                                .max_height(400.0)
-                                .show(ui, |ui| {
-                                    for chip_info in &self.available_chips {
-                                        if search_lower.is_empty()
-                                            || chip_info
-                                                .display_name
-                                                .to_lowercase()
-                                                .contains(&search_lower)
+                // Custom combo-box-like button
+                let button = egui::Button::new(egui::RichText::new(format!("{} ▼", selected_text)))
+                    .min_size(egui::vec2(400.0, 0.0));
+                let response = ui.add(button);
+
+                if response.clicked() {
+                    ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+                }
+
+                // Use popup with CloseOnClickOutside so clicking the search field doesn't close it
+                let search_field_id = ui.make_persistent_id("chip_search_field");
+                egui::popup::popup_below_widget(
+                    ui,
+                    popup_id,
+                    &response,
+                    egui::popup::PopupCloseBehavior::CloseOnClickOutside,
+                    |ui| {
+                        ui.set_min_width(400.0);
+
+                        // Search filter - always request focus so it's ready for typing
+                        let search_response = ui.add(
+                            egui::TextEdit::singleline(&mut self.chip_search)
+                                .id(search_field_id)
+                                .hint_text("Search chips..."),
+                        );
+                        search_response.request_focus();
+                        ui.separator();
+
+                        // Filter and display chips using pre-computed names
+                        let search_lower = self.chip_search.to_lowercase();
+                        egui::ScrollArea::vertical()
+                            .max_height(400.0)
+                            .show(ui, |ui| {
+                                for chip_info in &self.available_chips {
+                                    if search_lower.is_empty()
+                                        || chip_info
+                                            .display_name
+                                            .to_lowercase()
+                                            .contains(&search_lower)
+                                    {
+                                        let is_selected = self
+                                            .selected_chip
+                                            .as_ref()
+                                            .map(|c| Rc::ptr_eq(c, &chip_info.chip))
+                                            .unwrap_or(false);
+                                        if ui
+                                            .selectable_label(is_selected, &chip_info.display_name)
+                                            .clicked()
                                         {
-                                            let is_selected = self
-                                                .selected_chip
-                                                .as_ref()
-                                                .map(|c| Rc::ptr_eq(c, &chip_info.chip))
-                                                .unwrap_or(false);
-                                            if ui
-                                                .selectable_label(
-                                                    is_selected,
-                                                    &chip_info.display_name,
-                                                )
-                                                .clicked()
-                                            {
-                                                chip_to_set = Some(Rc::clone(&chip_info.chip));
-                                            }
+                                            chip_to_set = Some(Rc::clone(&chip_info.chip));
+                                            ui.memory_mut(|mem| mem.close_popup());
                                         }
                                     }
-                                });
-                        });
-                });
+                                }
+                            });
+                    },
+                );
 
                 if let Some(chip) = chip_to_set {
                     self.set_chip(chip);
