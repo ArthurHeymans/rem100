@@ -24,7 +24,14 @@
     <script>
         // Check for WebUSB support
         if (!navigator.usb) {
-            document.getElementById('webusb-warning').classList.add('show');
+            var warning = document.getElementById('webusb-warning');
+            // Brave exposes navigator.brave
+            if (navigator.brave && typeof navigator.brave.isBrave === 'function') {
+                warning.innerHTML =
+                    'WebUSB is blocked by Brave shields. Click the Brave icon in the address bar ' +
+                    'and disable shields for this site, then reload the page.';
+            }
+            warning.classList.add('show');
         }
         
         // Hide loading screen when WASM is ready
