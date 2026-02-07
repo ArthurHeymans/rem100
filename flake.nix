@@ -29,6 +29,9 @@
             "rust-src"
             "rust-analyzer"
           ];
+          targets = [
+            "wasm32-unknown-unknown"
+          ];
         };
       in
       {
@@ -38,6 +41,20 @@
             pkgs.pkg-config
             pkgs.xz
             pkgs.openssl
+            # Web development tools
+            pkgs.trunk
+            pkgs.wasm-bindgen-cli
+          ]
+          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            # For native GUI on Linux (xdg-portal)
+            pkgs.dbus
+            pkgs.wayland
+            pkgs.libxkbcommon
+            pkgs.xorg.libX11
+            pkgs.xorg.libXcursor
+            pkgs.xorg.libXrandr
+            pkgs.xorg.libXi
+            pkgs.libGL
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             pkgs.darwin.apple_sdk.frameworks.Security
@@ -47,6 +64,21 @@
           env = {
             RUST_BACKTRACE = "1";
           };
+
+          # Set library paths for native GUI on Linux
+          shellHook = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+            export LD_LIBRARY_PATH="${
+              pkgs.lib.makeLibraryPath [
+                pkgs.wayland
+                pkgs.libxkbcommon
+                pkgs.xorg.libX11
+                pkgs.xorg.libXcursor
+                pkgs.xorg.libXrandr
+                pkgs.xorg.libXi
+                pkgs.libGL
+              ]
+            }:$LD_LIBRARY_PATH"
+          '';
         };
 
         packages.default = pkgs.rustPlatform.buildRustPackage {

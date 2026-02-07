@@ -15,13 +15,55 @@ Major features provided by the tool include:
 - Output a trace of SPI commands issued by the SoC
 - Reading / writing em100 firmware (dangerous as it can brick your em100)
 
-## Building
+## Linux USB Permissions
+
+On Linux, you need to set up udev rules to access the EM100 without root permissions. Create a udev rule:
 
 ```bash
-cargo build --release
+echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="04b4", ATTR{idProduct}=="1235", MODE="0666", TAG+="uaccess"' | sudo tee /etc/udev/rules.d/99-em100.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+Then unplug and replug the EM100.
+
+## Building
+
+### CLI
+
+```bash
+cargo build --release --features cli
 ```
 
 The binary will be available at `target/release/rem100`.
+
+### Web Interface
+
+A GUI interface is available in two variants:
+
+#### Native Desktop GUI
+
+```bash
+cargo run --features web --no-default-features --bin rem100-web
+```
+
+#### Web (WASM) Interface
+
+A WebUSB-based web interface using egui/eframe:
+
+```bash
+# Install trunk (if not already installed)
+cargo install trunk
+
+# Build and serve the web interface
+trunk serve
+```
+
+Then open http://127.0.0.1:8080 in Chrome or Edge (WebUSB is not supported in Firefox).
+
+**Note:** The Linux udev rules above are also required for the web interface.
+
+For detailed web interface documentation including architecture, feature flags, and development setup, see [README-web.md](README-web.md).
 
 ## Usage
 

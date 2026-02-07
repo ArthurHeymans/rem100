@@ -322,11 +322,14 @@ fn main() {
     if args.stop {
         if let Err(e) = em100.set_state(false) {
             eprintln!("Error stopping emulation: {}", e);
+        } else {
+            println!("Stopped EM100Pro");
         }
     }
 
     // Set chip type
     if let Some(chip) = &chip {
+        println!("Configuring SPI flash chip emulation.");
         if let Err(e) = em100.set_chip_type(chip) {
             eprintln!("Failed configuring chip type: {}", e);
             std::process::exit(1);
@@ -337,6 +340,8 @@ fn main() {
         if args.address_mode.is_none() && chip.size > 16 * 1024 * 1024 {
             if let Err(e) = em100.set_address_mode(4) {
                 eprintln!("Warning: {}", e);
+            } else {
+                println!("Enabled 4 byte address mode");
             }
         }
     }
@@ -347,6 +352,7 @@ fn main() {
             eprintln!("Error: {}", e);
             std::process::exit(1);
         }
+        println!("Enabled {} byte address mode", mode);
     }
 
     // Set voltage (obsolete)
@@ -380,6 +386,7 @@ fn main() {
                     eprintln!("Failed configuring hold pin state: {}", e);
                     std::process::exit(1);
                 }
+                println!("Hold pin state set to {}", state);
             }
             Err(e) => {
                 eprintln!("{}", e);
@@ -517,6 +524,8 @@ fn main() {
     if args.start {
         if let Err(e) = em100.set_state(true) {
             eprintln!("Error starting emulation: {}", e);
+        } else {
+            println!("Started EM100Pro");
         }
     }
 

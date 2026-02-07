@@ -1,0 +1,27 @@
+# Trunk configuration for building the web interface
+# https://trunkrs.dev/configuration/
+
+[build]
+# The index HTML file to drive the bundling process
+target = "index.html"
+# The output dir for all final assets
+dist = "dist"
+
+[watch]
+# Paths to watch for changes
+watch = ["src", "index.html", "Trunk.toml"]
+# Files to ignore
+ignore = ["target", "dist"]
+
+[serve]
+# The address to serve on
+address = "127.0.0.1"
+# The port to serve on
+port = 8081
+# Open browser automatically
+open = false
+
+[[hooks]]
+stage = "pre_build"
+command = "sh"
+command_arguments = ["-c", "echo 'Building rem100 web interface...'"]

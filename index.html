@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>EM100Pro Control</title>
+    <link data-trunk rel="css" href="assets/style.css">
+</head>
+<body>
+    <div id="webusb-warning" class="webusb-warning">
+        WebUSB is not supported in this browser. Please use Chrome, Edge, or Opera.
+    </div>
+    
+    <div id="loading">
+        <h1>EM100Pro Control</h1>
+        <div class="spinner"></div>
+        <p>Loading WebAssembly...</p>
+    </div>
+    
+    <canvas id="em100_canvas"></canvas>
+    
+    <link data-trunk rel="rust" data-wasm-opt="s" data-bin="rem100-web" data-cargo-features="web" data-cargo-no-default-features />
+    
+    <script>
+        // Check for WebUSB support
+        if (!navigator.usb) {
+            document.getElementById('webusb-warning').classList.add('show');
+        }
+        
+        // Hide loading screen when WASM is ready
+        window.addEventListener('load', function() {
+            // Give a small delay for WASM initialization
+            setTimeout(function() {
+                var loading = document.getElementById('loading');
+                if (loading) {
+                    loading.style.display = 'none';
+                }
+            }, 100);
+        });
+    </script>
+</body>
+</html>

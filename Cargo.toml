@@ -9,22 +9,16 @@ repository = "https://github.com/user/rem100"
 keywords = ["em100", "spi", "flash", "emulator", "dediprog"]
 categories = ["command-line-utilities", "hardware-support"]
 
+[features]
+default = ["cli"]
+cli = ["clap", "ctrlc", "indicatif", "reqwest", "xz2", "tar", "dirs"]
+web = ["eframe", "egui", "poll-promise", "env_logger"]
+native-gui = ["web", "rfd/xdg-portal", "rfd/tokio"]
+
 [dependencies]
-# USB communication (native Rust, no libusb)
-nusb = "0.2"
+# USB communication with WebUSB support
+nusb = { git = "https://github.com/ArthurHeymans/nusb.git", branch = "task/webusb-rebased" }
 futures-lite = "2"
-
-# CLI argument parsing
-clap = { version = "4", features = ["derive"] }
-
-# Async HTTP for downloads
-reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false }
-
-# XZ decompression for tar.xz archives
-xz2 = "0.1"
-
-# Tar archive handling
-tar = "0.4"
 
 # Error handling
 thiserror = "1"
@@ -33,15 +27,95 @@ anyhow = "1"
 # Byte order conversion
 byteorder = "1"
 
-# Directory paths
-dirs = "5"
+# CLI-only dependencies
+clap = { version = "4", features = ["derive"], optional = true }
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false, optional = true }
+xz2 = { version = "0.1", optional = true }
+tar = { version = "0.4", optional = true }
+dirs = { version = "5", optional = true }
+ctrlc = { version = "3", optional = true }
+indicatif = { version = "0.17", optional = true }
 
-# Signal handling
-ctrlc = "3"
+# Web/GUI dependencies
+eframe = { version = "0.29", optional = true, default-features = false, features = ["default_fonts", "glow", "persistence"] }
+egui = { version = "0.29", optional = true }
+poll-promise = { version = "0.3", optional = true, features = ["web"] }
+rfd = { version = "0.15", optional = true, default-features = false, features = ["xdg-portal", "tokio"] }
+env_logger = { version = "0.11", optional = true }
 
-# Progress display
-indicatif = "0.17"
+# Web-specific dependencies
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "console",
+    "Window",
+    "Document",
+    "HtmlElement",
+    "HtmlInputElement",
+    "HtmlCanvasElement",
+    "HtmlAnchorElement",
+    "Blob",
+    "BlobPropertyBag",
+    "Url",
+    "File",
+    "FileList",
+    "Navigator",
+    "WorkerNavigator",
+    "WorkerGlobalScope",
+    # WebUSB API types (needed by nusb)
+    "Usb",
+    "UsbDevice",
+    "UsbConfiguration",
+    "UsbInterface",
+    "UsbAlternateInterface",
+    "UsbEndpoint",
+    "UsbDirection",
+    "UsbEndpointType",
+    "UsbControlTransferParameters",
+    "UsbDeviceFilter",
+    "UsbDeviceRequestOptions",
+    "UsbInTransferResult",
+    "UsbOutTransferResult",
+    "UsbIsochronousInTransferResult",
+    "UsbIsochronousOutTransferResult",
+    "UsbIsochronousInTransferPacket",
+    "UsbIsochronousOutTransferPacket",
+    "UsbTransferStatus",
+    "UsbRecipient",
+    "UsbRequestType",
+    "UsbConnectionEvent",
+    "UsbConnectionEventInit",
+] }
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+tracing-wasm = "0.2"
+getrandom = { version = "0.2", features = ["js"] }
+atomic-waker = "1"
+
+[[bin]]
+name = "rem100"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "rem100-web"
+path = "src/web_main.rs"
+required-features = ["web"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [profile.release]
 opt-level = 3
 lto = true
+
+[profile.release-wasm]
+inherits = "release"
+opt-level = "s"
+lto = true
+
+[build-dependencies]
+xz2 = "0.1"
+tar = "0.4"
+byteorder = "1"

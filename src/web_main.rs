@@ -1,0 +1,1018 @@
+//! Web interface entry point for EM100Pro
+//!
+//! This binary provides a GUI interface using egui/eframe.
+//! It can run as a native desktop app or as a WebAssembly app in the browser.
+
+#[cfg(not(target_arch = "wasm32"))]
+fn main() -> eframe::Result<()> {
+    env_logger::init();
+    rem100::web::run()
+}
+
+#[cfg(target_arch = "wasm32")]
+mod wasm_app {
+    use egui::Color32;
+    use rem100::chips::{ChipDatabase, ChipDesc};
+    use rem100::web_device::{DeviceInfo, Em100Async, HoldPinState};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_futures::spawn_local;
+    use web_sys::HtmlInputElement;
+
+    /// Chip info with cached display name
+    struct ChipInfo {
+        chip: Rc<ChipDesc>,
+        display_name: String,
+    }
+
+    /// Connection state for async device operations
+    #[derive(Default)]
+    enum ConnectionState {
+        #[default]
+        Disconnected,
+        Connecting,
+        Connected,
+        Error(String),
+    }
+
+    /// Async operation state
+    #[derive(Default)]
+    enum AsyncOp {
+        #[default]
+        Idle,
+        InProgress(String),
+        Success(String),
+        Error(String),
+    }
+
+    /// Web app state shared with async tasks
+    struct SharedState {
+        device: Option<Em100Async>,
+        device_info: Option<DeviceInfo>,
+        is_running: bool,
+        hold_pin_state: HoldPinState,
+        connection_state: ConnectionState,
+        async_op: AsyncOp,
+        progress: f32,
+        progress_message: String,
+        download_data: Option<Vec<u8>>,  // data downloaded from device
+        pending_file: Option<(String, Vec<u8>)>, // (filename, data) from file picker
+    }
+
+    impl Default for SharedState {
+        fn default() -> Self {
+            Self {
+                device: None,
+                device_info: None,
+                is_running: false,
+                hold_pin_state: HoldPinState::Float,
+                connection_state: ConnectionState::Disconnected,
+                async_op: AsyncOp::Idle,
+                progress: 0.0,
+                progress_message: String::new(),
+                download_data: None,
+                pending_file: None,
+            }
+        }
+    }
+
+    /// Web app for EM100Pro control via WebUSB
+    pub struct Em100WebApp {
+        /// Shared state for async operations
+        state: Rc<RefCell<SharedState>>,
+        /// Available chips with cached display names
+        available_chips: Vec<ChipInfo>,
+        /// Selected chip
+        selected_chip: Option<Rc<ChipDesc>>,
+        /// Chip search query
+        chip_search: String,
+        /// File data to upload to device
+        upload_file_data: Option<Vec<u8>>,
+        /// Upload filename
+        upload_filename: String,
+        /// Start address for upload
+        start_address: String,
+        /// Address mode (3 or 4)
+        address_mode: u8,
+        /// Current panel
+        current_panel: Panel,
+        /// Status message
+        status_message: String,
+        /// Status is error
+        status_is_error: bool,
+    }
+
+    #[derive(Default, PartialEq, Clone, Copy)]
+    enum Panel {
+        #[default]
+        Device,
+        Debug,
+    }
+
+    impl Em100WebApp {
+        pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+            // Load chip database
+            let chip_db = ChipDatabase::load_embedded();
+
+            // Wrap chips in Rc and pre-compute display names
+            let available_chips: Vec<ChipInfo> = chip_db
+                .chips
+                .into_iter()
+                .map(|chip| {
+                    let display_name = format!("{} {}", chip.vendor, chip.name);
+                    ChipInfo {
+                        chip: Rc::new(chip),
+                        display_name,
+                    }
+                })
+                .collect();
+
+            Self {
+                state: Rc::new(RefCell::new(SharedState::default())),
+                available_chips,
+                selected_chip: None,
+                chip_search: String::new(),
+                upload_file_data: None,
+                upload_filename: String::new(),
+                start_address: "0".to_string(),
+                address_mode: 3,
+                current_panel: Panel::Device,
+                status_message: "Click 'Connect Device' to connect via WebUSB".to_string(),
+                status_is_error: false,
+            }
+        }
+
+        fn request_device(&mut self) {
+            let state = self.state.clone();
+
+            // Mark as connecting
+            state.borrow_mut().connection_state = ConnectionState::Connecting;
+
+            spawn_local(async move {
+                match Em100Async::request_device().await {
+                    Ok(device_info) => match Em100Async::open(device_info).await {
+                        Ok(mut device) => {
+                            let info = device.get_info();
+                            let is_running = device.get_state().await.unwrap_or(false);
+                            let hold_pin = device
+                                .get_hold_pin_state()
+                                .await
+                                .unwrap_or(HoldPinState::Float);
+
+                            let mut s = state.borrow_mut();
+                            s.device_info = Some(info);
+                            s.is_running = is_running;
+                            s.hold_pin_state = hold_pin;
+                            s.device = Some(device);
+                            s.connection_state = ConnectionState::Connected;
+                            s.async_op = AsyncOp::Success("Connected successfully".to_string());
+                        }
+                        Err(e) => {
+                            let mut s = state.borrow_mut();
+                            s.connection_state =
+                                ConnectionState::Error(format!("Failed to open device: {}", e));
+                            s.async_op = AsyncOp::Error(format!("Connection failed: {}", e));
+                        }
+                    },
+                    Err(e) => {
+                        let mut s = state.borrow_mut();
+                        s.connection_state =
+                            ConnectionState::Error(format!("No device selected: {}", e));
+                        s.async_op = AsyncOp::Error(format!("Device request failed: {}", e));
+                    }
+                }
+            });
+        }
+
+        fn disconnect(&mut self) {
+            let mut s = self.state.borrow_mut();
+            s.device = None;
+            s.device_info = None;
+            s.connection_state = ConnectionState::Disconnected;
+            s.async_op = AsyncOp::Success("Disconnected".to_string());
+        }
+
+        fn set_emulation_state(&mut self, running: bool) {
+            let state = self.state.clone();
+            state.borrow_mut().async_op = AsyncOp::InProgress(
+                if running {
+                    "Starting emulation..."
+                } else {
+                    "Stopping emulation..."
+                }
+                .to_string(),
+            );
+
+            spawn_local(async move {
+                // Take device out of state to avoid holding borrow across await
+                let device = {
+                    let mut s = state.borrow_mut();
+                    s.device.take()
+                };
+
+                let (result, device) = if let Some(mut dev) = device {
+                    let res = dev.set_state(running).await;
+                    (Some(res), Some(dev))
+                } else {
+                    (None, None)
+                };
+
+                // Put device back and update state
+                let mut s = state.borrow_mut();
+                s.device = device;
+                match result {
+                    Some(Ok(_)) => {
+                        s.is_running = running;
+                        s.async_op = AsyncOp::Success(
+                            if running {
+                                "Emulation started"
+                            } else {
+                                "Emulation stopped"
+                            }
+                            .to_string(),
+                        );
+                    }
+                    Some(Err(e)) => {
+                        s.async_op = AsyncOp::Error(format!("Failed to set state: {}", e));
+                    }
+                    None => {
+                        s.async_op = AsyncOp::Error("No device connected".to_string());
+                    }
+                }
+            });
+        }
+
+        fn set_address_mode(&mut self, mode: u8) {
+            let state = self.state.clone();
+            state.borrow_mut().async_op =
+                AsyncOp::InProgress(format!("Setting {}-byte address mode...", mode));
+
+            spawn_local(async move {
+                // Take device out of state to avoid holding borrow across await
+                let device = {
+                    let mut s = state.borrow_mut();
+                    s.device.take()
+                };
+
+                let (result, device) = if let Some(mut dev) = device {
+                    let res = dev.set_address_mode(mode).await;
+                    (Some(res), Some(dev))
+                } else {
+                    (None, None)
+                };
+
+                // Put device back and update state
+                let mut s = state.borrow_mut();
+                s.device = device;
+                match result {
+                    Some(Ok(_)) => {
+                        s.async_op = AsyncOp::Success(format!(
+                            "Address mode set to {}-byte",
+                            mode
+                        ));
+                    }
+                    Some(Err(e)) => {
+                        s.async_op =
+                            AsyncOp::Error(format!("Failed to set address mode: {}", e));
+                    }
+                    None => {
+                        s.async_op = AsyncOp::Error("No device connected".to_string());
+                    }
+                }
+            });
+        }
+
+        fn set_hold_pin(&mut self, hold_state: HoldPinState) {
+            let state = self.state.clone();
+            state.borrow_mut().async_op = AsyncOp::InProgress("Setting hold pin...".to_string());
+
+            spawn_local(async move {
+                // Take device out of state to avoid holding borrow across await
+                let device = {
+                    let mut s = state.borrow_mut();
+                    s.device.take()
+                };
+
+                let (result, device) = if let Some(mut dev) = device {
+                    let res = dev.set_hold_pin_state(hold_state).await;
+                    (Some(res), Some(dev))
+                } else {
+                    (None, None)
+                };
+
+                // Put device back and update state
+                let mut s = state.borrow_mut();
+                s.device = device;
+                match result {
+                    Some(Ok(_)) => {
+                        s.hold_pin_state = hold_state;
+                        s.async_op = AsyncOp::Success(format!("Hold pin set to {}", hold_state));
+                    }
+                    Some(Err(e)) => {
+                        s.async_op = AsyncOp::Error(format!("Failed to set hold pin: {}", e));
+                    }
+                    None => {
+                        s.async_op = AsyncOp::Error("No device connected".to_string());
+                    }
+                }
+            });
+        }
+
+        fn set_chip(&mut self, chip: Rc<ChipDesc>) {
+            let state = self.state.clone();
+            let chip_for_async = chip.clone();
+            state.borrow_mut().async_op =
+                AsyncOp::InProgress(format!("Setting chip to {} {}...", chip.vendor, chip.name));
+
+            spawn_local(async move {
+                // Take device out of state to avoid holding borrow across await
+                let device = {
+                    let mut s = state.borrow_mut();
+                    s.device.take()
+                };
+
+                let (result, device) = if let Some(mut dev) = device {
+                    let res = dev.set_chip_type(&*chip_for_async).await;
+                    (Some(res), Some(dev))
+                } else {
+                    (None, None)
+                };
+
+                // Put device back and update state
+                let mut s = state.borrow_mut();
+                s.device = device;
+                match result {
+                    Some(Ok(_)) => {
+                        // set_chip_type stops emulation, so update is_running
+                        s.is_running = false;
+                        let mode_msg = if chip_for_async.size > 16 * 1024 * 1024 {
+                            " (4-byte address mode enabled)"
+                        } else {
+                            ""
+                        };
+                        s.async_op = AsyncOp::Success(format!(
+                            "Chip set to {} {}{}",
+                            chip_for_async.vendor, chip_for_async.name, mode_msg
+                        ));
+                    }
+                    Some(Err(e)) => {
+                        s.async_op = AsyncOp::Error(format!("Failed to set chip: {}", e));
+                    }
+                    None => {
+                        s.async_op = AsyncOp::Error("No device connected".to_string());
+                    }
+                }
+            });
+
+            self.selected_chip = Some(chip);
+        }
+
+        fn select_file(&mut self) {
+            let state = self.state.clone();
+
+            // Create a file input element
+            let window = web_sys::window().expect("no window");
+            let document = window.document().expect("no document");
+            let input: HtmlInputElement = document
+                .create_element("input")
+                .expect("failed to create input")
+                .dyn_into()
+                .expect("not an input element");
+
+            input.set_type("file");
+            input.set_accept(".bin,.rom,.img,*");
+
+            // Set up event handler for file selection
+            let onchange = Closure::wrap(Box::new(move |event: web_sys::Event| {
+                let input: HtmlInputElement = event.target().unwrap().dyn_into().unwrap();
+                if let Some(files) = input.files() {
+                    if let Some(file) = files.get(0) {
+                        let filename = file.name();
+                        let state = state.clone();
+
+                        spawn_local(async move {
+                            // Read file as array buffer
+                            let array_buffer =
+                                wasm_bindgen_futures::JsFuture::from(file.array_buffer())
+                                    .await
+                                    .expect("failed to read file");
+
+                            let uint8_array = js_sys::Uint8Array::new(&array_buffer);
+                            let data = uint8_array.to_vec();
+
+                            let mut s = state.borrow_mut();
+                            s.pending_file = Some((filename, data));
+                            s.async_op = AsyncOp::Success("File loaded".to_string());
+                        });
+                    }
+                }
+            }) as Box<dyn FnMut(_)>);
+
+            input.set_onchange(Some(onchange.as_ref().unchecked_ref()));
+            onchange.forget(); // Keep the closure alive
+
+            // Trigger the file dialog
+            input.click();
+        }
+
+        fn upload_to_device(&mut self) {
+            let data = match &self.upload_file_data {
+                Some(d) => d.clone(),
+                None => return,
+            };
+
+            let start_addr = parse_hex(&self.start_address).unwrap_or(0) as u32;
+            let state = self.state.clone();
+
+            {
+                let mut s = state.borrow_mut();
+                s.progress = 0.0;
+                s.progress_message = "Uploading to device...".to_string();
+                s.async_op = AsyncOp::InProgress("Uploading data to device...".to_string());
+            }
+
+            spawn_local(async move {
+                // Take device out of state to avoid holding borrow across await
+                let device = {
+                    let mut s = state.borrow_mut();
+                    s.device.take()
+                };
+
+                let (result, device) = if let Some(mut dev) = device {
+                    // Stop emulation before writing to memory
+                    let _ = dev.set_state(false).await;
+                    let res = dev.download(&data, start_addr).await;
+                    (Some(res), Some(dev))
+                } else {
+                    (None, None)
+                };
+
+                // Put device back and update state
+                let mut s = state.borrow_mut();
+                s.device = device;
+                s.progress = 1.0;
+                match result {
+                    Some(Ok(_)) => {
+                        // Emulation was stopped before upload
+                        s.is_running = false;
+                        s.async_op = AsyncOp::Success(
+                            "Upload complete. Emulation stopped - press Start to resume."
+                                .to_string(),
+                        );
+                    }
+                    Some(Err(e)) => {
+                        s.is_running = false;
+                        s.async_op = AsyncOp::Error(format!("Upload failed: {}", e));
+                    }
+                    None => {
+                        s.async_op = AsyncOp::Error("No device connected".to_string());
+                    }
+                }
+            });
+        }
+
+        fn download_from_device(&mut self) {
+            let size = self
+                .selected_chip
+                .as_ref()
+                .map(|c| c.size as usize)
+                .unwrap_or(0x4000000);
+
+            let state = self.state.clone();
+
+            {
+                let mut s = state.borrow_mut();
+                s.progress = 0.0;
+                s.progress_message = "Downloading from device...".to_string();
+                s.async_op =
+                    AsyncOp::InProgress("Downloading data from device...".to_string());
+            }
+
+            spawn_local(async move {
+                // Take device out of state to avoid holding borrow across await
+                let device = {
+                    let mut s = state.borrow_mut();
+                    s.device.take()
+                };
+
+                let (result, device) = if let Some(mut dev) = device {
+                    let res = dev.upload(0, size).await;
+                    (Some(res), Some(dev))
+                } else {
+                    (None, None)
+                };
+
+                // Put device back and update state
+                let mut s = state.borrow_mut();
+                s.device = device;
+                s.progress = 1.0;
+                match result {
+                    Some(Ok(data)) => {
+                        s.download_data = Some(data);
+                        s.async_op = AsyncOp::Success("Download complete".to_string());
+                    }
+                    Some(Err(e)) => {
+                        s.async_op = AsyncOp::Error(format!("Download failed: {}", e));
+                    }
+                    None => {
+                        s.async_op = AsyncOp::Error("No device connected".to_string());
+                    }
+                }
+            });
+        }
+
+        /// Save data to a file using browser download
+        fn save_file_browser(data: &[u8], filename: &str) {
+            let uint8_array = js_sys::Uint8Array::from(data);
+            let array = js_sys::Array::new();
+            array.push(&uint8_array.buffer());
+
+            let options = web_sys::BlobPropertyBag::new();
+            options.set_type("application/octet-stream");
+
+            let blob =
+                web_sys::Blob::new_with_u8_array_sequence_and_options(&array, &options).unwrap();
+
+            let url = web_sys::Url::create_object_url_with_blob(&blob).unwrap();
+
+            let window = web_sys::window().unwrap();
+            let document = window.document().unwrap();
+            let a = document
+                .create_element("a")
+                .unwrap()
+                .dyn_into::<web_sys::HtmlAnchorElement>()
+                .unwrap();
+
+            a.set_href(&url);
+            a.set_download(filename);
+            a.style().set_property("display", "none").unwrap();
+
+            let body = document.body().unwrap();
+            body.append_child(&a).unwrap();
+            a.click();
+            body.remove_child(&a).unwrap();
+
+            web_sys::Url::revoke_object_url(&url).unwrap();
+        }
+
+        /// Render device panel
+        fn device_panel(&mut self, ui: &mut egui::Ui) {
+            ui.heading("Device");
+            ui.separator();
+
+            let state = self.state.borrow();
+            let is_connected = matches!(state.connection_state, ConnectionState::Connected);
+            let is_connecting = matches!(state.connection_state, ConnectionState::Connecting);
+            drop(state);
+
+            // Connect/disconnect buttons
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        !is_connected && !is_connecting,
+                        egui::Button::new("Connect Device"),
+                    )
+                    .clicked()
+                {
+                    self.request_device();
+                }
+                if ui
+                    .add_enabled(is_connected, egui::Button::new("Disconnect"))
+                    .clicked()
+                {
+                    self.disconnect();
+                }
+                if is_connecting {
+                    ui.spinner();
+                    ui.label("Connecting...");
+                }
+            });
+
+            // Connection status
+            let state = self.state.borrow();
+            match &state.connection_state {
+                ConnectionState::Disconnected => {
+                    ui.label("No device connected");
+                }
+                ConnectionState::Connecting => {
+                    ui.label("Requesting device access...");
+                }
+                ConnectionState::Connected => {
+                    ui.label(egui::RichText::new("Connected").color(Color32::GREEN));
+                }
+                ConnectionState::Error(e) => {
+                    ui.label(egui::RichText::new(format!("Error: {}", e)).color(Color32::RED));
+                }
+            }
+
+            // Device info
+            if let Some(ref info) = state.device_info {
+                ui.add_space(16.0);
+                ui.separator();
+                ui.heading("Device Information");
+
+                egui::Grid::new("device_info_grid")
+                    .num_columns(2)
+                    .spacing([20.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Serial:");
+                        ui.label(&info.serial);
+                        ui.end_row();
+
+                        ui.label("Hardware:");
+                        ui.label(format!("{:?}", info.hw_version));
+                        ui.end_row();
+
+                        ui.label("MCU Version:");
+                        ui.label(&info.mcu_version);
+                        ui.end_row();
+
+                        ui.label("FPGA Version:");
+                        ui.label(&info.fpga_version);
+                        ui.end_row();
+                    });
+            }
+
+            let is_running = state.is_running;
+            let hold_pin_state = state.hold_pin_state;
+            drop(state);
+
+            // Control panel
+            if is_connected {
+                ui.add_space(16.0);
+                ui.separator();
+                ui.heading("Control");
+
+                ui.horizontal(|ui| {
+                    ui.label("Emulation:");
+                    if ui
+                        .add_enabled(!is_running, egui::Button::new("Start"))
+                        .clicked()
+                    {
+                        self.set_emulation_state(true);
+                    }
+                    if ui
+                        .add_enabled(is_running, egui::Button::new("Stop"))
+                        .clicked()
+                    {
+                        self.set_emulation_state(false);
+                    }
+
+                    let status_text = if is_running {
+                        egui::RichText::new("Running").color(Color32::GREEN)
+                    } else {
+                        egui::RichText::new("Stopped").color(Color32::RED)
+                    };
+                    ui.label(status_text);
+                });
+
+                ui.add_space(8.0);
+
+                let mut hold_pin_to_set: Option<HoldPinState> = None;
+                ui.horizontal(|ui| {
+                    ui.label("Hold Pin:");
+                    egui::ComboBox::from_id_salt("hold_pin")
+                        .selected_text(format!("{}", hold_pin_state))
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(hold_pin_state == HoldPinState::Float, "Float")
+                                .clicked()
+                            {
+                                hold_pin_to_set = Some(HoldPinState::Float);
+                            }
+                            if ui
+                                .selectable_label(hold_pin_state == HoldPinState::Low, "Low")
+                                .clicked()
+                            {
+                                hold_pin_to_set = Some(HoldPinState::Low);
+                            }
+                            if ui
+                                .selectable_label(hold_pin_state == HoldPinState::Input, "Input")
+                                .clicked()
+                            {
+                                hold_pin_to_set = Some(HoldPinState::Input);
+                            }
+                        });
+                });
+                if let Some(new_state) = hold_pin_to_set {
+                    self.set_hold_pin(new_state);
+                }
+
+                ui.add_space(8.0);
+                let mut address_mode_to_set: Option<u8> = None;
+                ui.horizontal(|ui| {
+                    ui.label("Address Mode:");
+                    if ui
+                        .selectable_value(&mut self.address_mode, 3, "3-byte")
+                        .clicked()
+                    {
+                        address_mode_to_set = Some(3);
+                    }
+                    if ui
+                        .selectable_value(&mut self.address_mode, 4, "4-byte")
+                        .clicked()
+                    {
+                        address_mode_to_set = Some(4);
+                    }
+                });
+                if let Some(mode) = address_mode_to_set {
+                    self.set_address_mode(mode);
+                }
+
+                ui.add_space(8.0);
+
+                // Chip selection
+                ui.label("Chip:");
+
+                let mut chip_to_set: Option<Rc<ChipDesc>> = None;
+                let popup_id = ui.make_persistent_id("chip_selector_popup");
+                let selected_text = if let Some(ref chip) = self.selected_chip {
+                    format!("{} {} ({} bytes)", chip.vendor, chip.name, chip.size)
+                } else {
+                    "Select chip...".to_string()
+                };
+
+                // Custom combo-box-like button
+                let button = egui::Button::new(egui::RichText::new(format!("{} ▼", selected_text)))
+                    .min_size(egui::vec2(500.0, 0.0));
+                let response = ui.add(button);
+
+                if response.clicked() {
+                    ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+                }
+
+                // Use popup with CloseOnClickOutside so clicking the search field doesn't close it
+                let search_field_id = ui.make_persistent_id("chip_search_field");
+                egui::popup::popup_below_widget(
+                    ui,
+                    popup_id,
+                    &response,
+                    egui::popup::PopupCloseBehavior::CloseOnClickOutside,
+                    |ui| {
+                        ui.set_min_width(500.0);
+
+                        // Search filter - always request focus so it's ready for typing
+                        let search_response = ui.add(
+                            egui::TextEdit::singleline(&mut self.chip_search)
+                                .id(search_field_id)
+                                .hint_text("Search chips..."),
+                        );
+                        search_response.request_focus();
+                        ui.separator();
+
+                        // Filter and display chips using pre-computed names
+                        let search_lower = self.chip_search.to_lowercase();
+                        egui::ScrollArea::vertical()
+                            .max_height(500.0)
+                            .show(ui, |ui| {
+                                for chip_info in &self.available_chips {
+                                    if search_lower.is_empty()
+                                        || chip_info
+                                            .display_name
+                                            .to_lowercase()
+                                            .contains(&search_lower)
+                                    {
+                                        let is_selected = self
+                                            .selected_chip
+                                            .as_ref()
+                                            .map(|c| Rc::ptr_eq(c, &chip_info.chip))
+                                            .unwrap_or(false);
+                                        if ui
+                                            .selectable_label(is_selected, &chip_info.display_name)
+                                            .clicked()
+                                        {
+                                            chip_to_set = Some(Rc::clone(&chip_info.chip));
+                                            ui.memory_mut(|mem| mem.close_popup());
+                                        }
+                                    }
+                                }
+                            });
+                    },
+                );
+
+                if let Some(chip) = chip_to_set {
+                    self.set_chip(chip);
+                }
+
+                // Memory operations section
+                ui.add_space(16.0);
+                ui.separator();
+                ui.heading("Memory");
+
+                // Get progress state
+                let state = self.state.borrow();
+                let progress = state.progress;
+                let progress_message = state.progress_message.clone();
+                let is_busy = matches!(state.async_op, AsyncOp::InProgress(_));
+                let download_data_len = state.download_data.as_ref().map(|d| d.len());
+                // Clone download data for save button (only when needed)
+                let download_data_for_save = state.download_data.clone();
+                drop(state);
+
+                // Upload to Device
+                ui.label("Upload to Device:");
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!is_busy, egui::Button::new("Select File..."))
+                        .clicked()
+                    {
+                        self.select_file();
+                    }
+                    if !self.upload_filename.is_empty() {
+                        ui.label(&self.upload_filename);
+                        if let Some(ref data) = self.upload_file_data {
+                            ui.label(format!("({} bytes)", data.len()));
+                        }
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Start Address:");
+                    ui.text_edit_singleline(&mut self.start_address);
+                });
+
+                ui.horizontal(|ui| {
+                    let can_upload = self.upload_file_data.is_some() && !is_busy;
+                    if ui
+                        .add_enabled(can_upload, egui::Button::new("Upload"))
+                        .clicked()
+                    {
+                        self.upload_to_device();
+                    }
+                    if is_busy && progress > 0.0 && progress < 1.0 {
+                        ui.spinner();
+                    }
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+
+                // Download from Device
+                ui.label("Download from Device:");
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!is_busy, egui::Button::new("Download"))
+                        .clicked()
+                    {
+                        self.download_from_device();
+                    }
+                    if let Some(len) = download_data_len {
+                        ui.label(format!("{} bytes", len));
+                        if ui.button("Save As...").clicked() {
+                            if let Some(ref data) = download_data_for_save {
+                                let filename = self
+                                    .selected_chip
+                                    .as_ref()
+                                    .map(|c| format!("{}.bin", c.name))
+                                    .unwrap_or_else(|| "memory.bin".to_string());
+                                Self::save_file_browser(data, &filename);
+                            }
+                        }
+                    }
+                    if is_busy && progress > 0.0 && progress < 1.0 {
+                        ui.spinner();
+                    }
+                });
+
+                // Progress bar
+                if is_busy && progress > 0.0 && progress < 1.0 {
+                    ui.add_space(8.0);
+                    ui.add(egui::ProgressBar::new(progress).text(&progress_message));
+                }
+            }
+        }
+
+        /// Render debug panel
+        fn debug_panel(&mut self, ui: &mut egui::Ui) {
+            ui.heading("Debug Information");
+            ui.separator();
+
+            let state = self.state.borrow();
+            let is_connected = matches!(state.connection_state, ConnectionState::Connected);
+            drop(state);
+
+            if !is_connected {
+                ui.label("Connect to a device first.");
+                return;
+            }
+
+            ui.label("Debug panel - voltage readings and FPGA registers coming soon.");
+        }
+    }
+
+    impl eframe::App for Em100WebApp {
+        fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+            // Check for pending file from file picker
+            if let Ok(mut state) = self.state.try_borrow_mut() {
+                if let Some((filename, data)) = state.pending_file.take() {
+                    self.status_message = format!("Loaded {} ({} bytes)", filename, data.len());
+                    self.status_is_error = false;
+                    self.upload_filename = filename;
+                    self.upload_file_data = Some(data);
+                }
+            }
+
+            // Update status from async operations
+            {
+                let state = self.state.borrow();
+                match &state.async_op {
+                    AsyncOp::Idle => {}
+                    AsyncOp::InProgress(msg) => {
+                        self.status_message = msg.clone();
+                        self.status_is_error = false;
+                    }
+                    AsyncOp::Success(msg) => {
+                        self.status_message = msg.clone();
+                        self.status_is_error = false;
+                    }
+                    AsyncOp::Error(msg) => {
+                        self.status_message = msg.clone();
+                        self.status_is_error = true;
+                    }
+                }
+            }
+
+            // Top panel with navigation
+            egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading("EM100Pro Web Interface");
+                    ui.separator();
+
+                    ui.selectable_value(&mut self.current_panel, Panel::Device, "Device");
+                    ui.selectable_value(&mut self.current_panel, Panel::Debug, "Debug");
+                });
+            });
+
+            // Bottom panel with status
+            egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let color = if self.status_is_error {
+                        Color32::RED
+                    } else {
+                        Color32::GREEN
+                    };
+                    ui.label(egui::RichText::new(&self.status_message).color(color));
+                });
+            });
+
+            // Central panel
+            egui::CentralPanel::default().show(ctx, |ui| match self.current_panel {
+                Panel::Device => self.device_panel(ui),
+                Panel::Debug => self.debug_panel(ui),
+            });
+
+            // Request repaint while async operations are in progress
+            let state = self.state.borrow();
+            if matches!(state.async_op, AsyncOp::InProgress(_))
+                || matches!(state.connection_state, ConnectionState::Connecting)
+            {
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    /// Parse hex string (with or without 0x prefix)
+    fn parse_hex(s: &str) -> Option<u64> {
+        let s = s.trim();
+        if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+            u64::from_str_radix(hex, 16).ok()
+        } else {
+            s.parse().ok()
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    use wasm_bindgen::JsCast;
+
+    // Redirect panic messages to the console
+    console_error_panic_hook::set_once();
+
+    // Redirect tracing to the console
+    tracing_wasm::set_as_global_default();
+
+    let web_options = eframe::WebOptions::default();
+
+    wasm_bindgen_futures::spawn_local(async {
+        let canvas = web_sys::window()
+            .expect("no window")
+            .document()
+            .expect("no document")
+            .get_element_by_id("em100_canvas")
+            .expect("no canvas element")
+            .dyn_into::<web_sys::HtmlCanvasElement>()
+            .expect("not a canvas element");
+
+        eframe::WebRunner::new()
+            .start(
+                canvas,
+                web_options,
+                Box::new(|cc| Ok(Box::new(wasm_app::Em100WebApp::new(cc)))),
+            )
+            .await
+            .expect("failed to start eframe");
+    });
+}
