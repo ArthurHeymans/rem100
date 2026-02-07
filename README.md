@@ -49,6 +49,8 @@ cargo run --features web --no-default-features --bin rem100-web
 
 #### Web (WASM) Interface
 
+A hosted version is available at https://arthurheymans.github.io/rem100/
+
 A WebUSB-based web interface using egui/eframe:
 
 ```bash
