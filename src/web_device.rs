@@ -97,8 +97,8 @@ pub struct DeviceInfo {
 
 /// Async EM100 device structure for WebUSB
 pub struct Em100Async {
-    /// USB interface (holds the device open)
-    interface: Interface,
+    /// USB interface (held to keep the device claim alive)
+    _interface: Interface,
     /// USB bulk OUT endpoint
     pub endpoint_out: Endpoint<Bulk, Out>,
     /// USB bulk IN endpoint
@@ -202,7 +202,7 @@ impl Em100Async {
         let endpoint_in = interface.endpoint::<Bulk, In>(ENDPOINT_IN)?;
 
         let mut em100 = Em100Async {
-            interface,
+            _interface: interface,
             endpoint_out,
             endpoint_in,
             mcu: 0,
@@ -533,82 +533,107 @@ impl Em100Async {
     }
 
     /// Write data to SDRAM
+    ///
+    /// Matches CLI protocol: send one command with the full transfer length,
+    /// then stream data in 2MB chunks.
     async fn write_sdram(&mut self, data: &[u8], address: u32) -> Result<()> {
-        const CHUNK_SIZE: usize = 0x10000; // 64KB chunks
+        const TRANSFER_LENGTH: usize = 0x200000; // 2MB chunks, matches CLI
 
-        let mut offset = 0;
-        while offset < data.len() {
-            let chunk_len = std::cmp::min(CHUNK_SIZE, data.len() - offset);
-            let chunk_addr = address + offset as u32;
+        let length = data.len();
 
-            // Send write command (0x40 = write to SDRAM)
-            let cmd = [
-                0x40u8,
-                (chunk_addr >> 24) as u8,
-                (chunk_addr >> 16) as u8,
-                (chunk_addr >> 8) as u8,
-                chunk_addr as u8,
-                (chunk_len >> 24) as u8,
-                (chunk_len >> 16) as u8,
-                (chunk_len >> 8) as u8,
-                chunk_len as u8,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-            ];
-            web_usb::send_cmd(&mut self.endpoint_out, &cmd).await?;
+        // Send single write command for the entire transfer
+        let cmd = [
+            0x40u8,
+            (address >> 24) as u8,
+            (address >> 16) as u8,
+            (address >> 8) as u8,
+            address as u8,
+            (length >> 24) as u8,
+            (length >> 16) as u8,
+            (length >> 8) as u8,
+            length as u8,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+        web_usb::send_cmd(&mut self.endpoint_out, &cmd).await?;
 
-            // Send data
-            let chunk = &data[offset..offset + chunk_len];
-            web_usb::bulk_write(&mut self.endpoint_out, chunk).await?;
+        // Stream data in 2MB chunks
+        let mut bytes_sent = 0;
+        while bytes_sent < length {
+            let chunk_len = std::cmp::min(TRANSFER_LENGTH, length - bytes_sent);
+            let chunk = &data[bytes_sent..bytes_sent + chunk_len];
+            let actual = web_usb::bulk_write(&mut self.endpoint_out, chunk).await?;
+            bytes_sent += actual;
 
-            offset += chunk_len;
+            if actual < chunk_len {
+                break;
+            }
+        }
+
+        if bytes_sent != length {
+            return Err(Error::Communication(format!(
+                "SDRAM write failed: sent {} of {} bytes",
+                bytes_sent, length
+            )));
         }
 
         Ok(())
     }
 
     /// Read data from SDRAM
+    ///
+    /// Matches CLI protocol: send one command with the full transfer length,
+    /// then read data in 2MB chunks.
     async fn read_sdram(&mut self, address: u32, length: usize) -> Result<Vec<u8>> {
-        const CHUNK_SIZE: usize = 0x10000; // 64KB chunks
+        const TRANSFER_LENGTH: usize = 0x200000; // 2MB chunks, matches CLI
 
+        // Send single read command for the entire transfer
+        let cmd = [
+            0x41u8,
+            (address >> 24) as u8,
+            (address >> 16) as u8,
+            (address >> 8) as u8,
+            address as u8,
+            (length >> 24) as u8,
+            (length >> 16) as u8,
+            (length >> 8) as u8,
+            length as u8,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+        web_usb::send_cmd(&mut self.endpoint_out, &cmd).await?;
+
+        // Read data in 2MB chunks
         let mut result = Vec::with_capacity(length);
-        let mut offset = 0;
+        let mut bytes_read = 0;
 
-        while offset < length {
-            let chunk_len = std::cmp::min(CHUNK_SIZE, length - offset);
-            let chunk_addr = address + offset as u32;
-
-            // Send read command (0x41 = read from SDRAM)
-            let cmd = [
-                0x41u8,
-                (chunk_addr >> 24) as u8,
-                (chunk_addr >> 16) as u8,
-                (chunk_addr >> 8) as u8,
-                chunk_addr as u8,
-                (chunk_len >> 24) as u8,
-                (chunk_len >> 16) as u8,
-                (chunk_len >> 8) as u8,
-                chunk_len as u8,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-            ];
-            web_usb::send_cmd(&mut self.endpoint_out, &cmd).await?;
-
-            // Read data
+        while bytes_read < length {
+            let chunk_len = std::cmp::min(TRANSFER_LENGTH, length - bytes_read);
             let chunk = web_usb::bulk_read(&mut self.endpoint_in, chunk_len).await?;
+            let actual = chunk.len();
             result.extend_from_slice(&chunk);
+            bytes_read += actual;
 
-            offset += chunk_len;
+            if actual < chunk_len {
+                break;
+            }
+        }
+
+        if bytes_read != length {
+            return Err(Error::Communication(format!(
+                "SDRAM read failed: read {} of {} bytes",
+                bytes_read, length
+            )));
         }
 
         Ok(result)

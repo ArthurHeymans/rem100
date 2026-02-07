@@ -31,16 +31,16 @@ pub struct Em100App {
     available_chips: Vec<ChipDesc>,
     /// Chip database version
     chip_db_version: String,
-    /// Downloaded data (for upload to device)
-    download_data: Option<Vec<u8>>,
-    /// Download filename
-    download_filename: String,
-    /// Start address for download
+    /// File data to upload to device
+    upload_file_data: Option<Vec<u8>>,
+    /// Upload filename
+    upload_filename: String,
+    /// Start address for upload
     start_address: String,
     /// Address mode (3 or 4)
     address_mode: u8,
-    /// Upload data (from device)
-    upload_data: Option<Vec<u8>>,
+    /// Data downloaded from device
+    download_data: Option<Vec<u8>>,
     /// Operation progress (0.0 - 1.0)
     progress: f32,
     /// Progress message
@@ -178,9 +178,11 @@ impl Em100App {
     fn set_chip(&mut self, chip: ChipDesc) {
         let result = if let Some(ref device) = self.device {
             if let Ok(mut em100) = device.lock() {
+                // Stop emulation before changing chip type (matches CLI --stop --set pattern)
+                let _ = em100.set_state(false);
                 let res = em100.set_chip_type(&chip);
                 // Auto-enable 4-byte mode for large chips
-                if res.is_ok() && self.address_mode == 3 && chip.size > 16 * 1024 * 1024 {
+                if res.is_ok() && chip.size > 16 * 1024 * 1024 {
                     if em100.set_address_mode(4).is_ok() {
                         self.address_mode = 4;
                     }
@@ -195,6 +197,8 @@ impl Em100App {
 
         match result {
             Ok(_) => {
+                // Emulation was stopped before chip change
+                self.is_running = false;
                 self.set_status(&format!("Chip set to {} {}", chip.vendor, chip.name), false);
                 self.selected_chip = Some(chip);
             }
@@ -204,9 +208,9 @@ impl Em100App {
         }
     }
 
-    /// Download data to device
-    fn download_to_device(&mut self) {
-        let data = match &self.download_data {
+    /// Upload data to device (write file to SDRAM)
+    fn upload_to_device(&mut self) {
+        let data = match &self.upload_file_data {
             Some(d) => d.clone(),
             None => return,
         };
@@ -214,8 +218,11 @@ impl Em100App {
 
         let result = if let Some(ref device) = self.device {
             if let Ok(em100) = device.lock() {
+                // Stop emulation before writing to memory
+                let _ = em100.set_state(false);
+                self.is_running = false;
                 self.progress = 0.0;
-                self.progress_message = "Downloading...".to_string();
+                self.progress_message = "Uploading to device...".to_string();
                 write_sdram_with_progress(&em100, &data, start_addr, None)
             } else {
                 return;
@@ -227,16 +234,19 @@ impl Em100App {
         match result {
             Ok(_) => {
                 self.progress = 1.0;
-                self.set_status("Download complete", false);
+                self.set_status(
+                    "Upload complete. Emulation stopped - press Start to resume.",
+                    false,
+                );
             }
             Err(e) => {
-                self.set_status(&format!("Download failed: {}", e), true);
+                self.set_status(&format!("Upload failed: {}", e), true);
             }
         }
     }
 
-    /// Upload data from device
-    fn upload_from_device(&mut self) {
+    /// Download data from device (read SDRAM to file)
+    fn download_from_device(&mut self) {
         let size = self
             .selected_chip
             .as_ref()
@@ -246,7 +256,7 @@ impl Em100App {
         let result = if let Some(ref device) = self.device {
             if let Ok(em100) = device.lock() {
                 self.progress = 0.0;
-                self.progress_message = "Uploading...".to_string();
+                self.progress_message = "Downloading from device...".to_string();
                 read_sdram_with_progress(&em100, 0, size, None)
             } else {
                 return;
@@ -257,12 +267,12 @@ impl Em100App {
 
         match result {
             Ok(data) => {
-                self.upload_data = Some(data);
+                self.download_data = Some(data);
                 self.progress = 1.0;
-                self.set_status("Upload complete", false);
+                self.set_status("Download complete", false);
             }
             Err(e) => {
-                self.set_status(&format!("Upload failed: {}", e), true);
+                self.set_status(&format!("Download failed: {}", e), true);
             }
         }
     }
@@ -357,6 +367,10 @@ impl Em100App {
 
                     ui.label("FPGA Version:");
                     ui.label(&info.fpga_version);
+                    ui.end_row();
+
+                    ui.label("Chip DB:");
+                    ui.label(&self.chip_db_version);
                     ui.end_row();
                 });
         }
@@ -461,7 +475,7 @@ impl Em100App {
                 };
 
                 egui::ComboBox::from_id_salt("chip_selector")
-                    .width(300.0)
+                    .width(500.0)
                     .selected_text(selected_text)
                     .show_ui(ui, |ui| {
                         // Add search filter
@@ -471,7 +485,7 @@ impl Em100App {
                         // Filter and display chips
                         let search_lower = self.chip_search.to_lowercase();
                         egui::ScrollArea::vertical()
-                            .max_height(300.0)
+                            .max_height(500.0)
                             .show(ui, |ui| {
                                 for chip in &self.available_chips {
                                     let chip_name = format!("{} {}", chip.vendor, chip.name);
@@ -510,20 +524,20 @@ impl Em100App {
 
         ui.separator();
 
-        // Download section
-        ui.heading("Download to Device");
+        // Upload to Device section
+        ui.heading("Upload to Device");
         ui.horizontal(|ui| {
             ui.label("File:");
-            ui.label(&self.download_filename);
+            ui.label(&self.upload_filename);
             #[cfg(all(not(target_arch = "wasm32"), feature = "rfd"))]
             if ui.button("Browse...").clicked() {
                 if let Some(path) = rfd::FileDialog::new().pick_file() {
                     if let Ok(data) = std::fs::read(&path) {
-                        self.download_filename = path
+                        self.upload_filename = path
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_default();
-                        self.download_data = Some(data);
+                        self.upload_file_data = Some(data);
                     }
                 }
             }
@@ -539,36 +553,35 @@ impl Em100App {
         });
 
         ui.horizontal(|ui| {
-            let can_download = self.download_data.is_some();
+            let can_upload = self.upload_file_data.is_some();
             if ui
-                .add_enabled(can_download, egui::Button::new("Download"))
+                .add_enabled(can_upload, egui::Button::new("Upload"))
                 .clicked()
             {
-                self.download_to_device();
+                self.upload_to_device();
             }
         });
 
         ui.add_space(16.0);
         ui.separator();
 
-        // Upload section
-        ui.heading("Upload from Device");
+        // Download from Device section
+        ui.heading("Download from Device");
         ui.horizontal(|ui| {
-            if ui.button("Upload").clicked() {
-                self.upload_from_device();
+            if ui.button("Download").clicked() {
+                self.download_from_device();
             }
-            if let Some(ref data) = self.upload_data {
+            if let Some(ref data) = self.download_data {
                 ui.label(format!("{} bytes", data.len()));
                 #[cfg(all(not(target_arch = "wasm32"), feature = "rfd"))]
-                if ui.button("Save...").clicked() {
+                if ui.button("Save As...").clicked() {
                     if let Some(path) = rfd::FileDialog::new().save_file() {
                         let _ = std::fs::write(&path, data);
                     }
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
-                    // TODO: Implement download via JS blob
-                    ui.label("(Download via browser)");
+                    ui.label("(Use Save As in browser)");
                 }
             }
         });

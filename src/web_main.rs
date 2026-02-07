@@ -57,7 +57,7 @@ mod wasm_app {
         async_op: AsyncOp,
         progress: f32,
         progress_message: String,
-        upload_data: Option<Vec<u8>>,
+        download_data: Option<Vec<u8>>,  // data downloaded from device
         pending_file: Option<(String, Vec<u8>)>, // (filename, data) from file picker
     }
 
@@ -72,7 +72,7 @@ mod wasm_app {
                 async_op: AsyncOp::Idle,
                 progress: 0.0,
                 progress_message: String::new(),
-                upload_data: None,
+                download_data: None,
                 pending_file: None,
             }
         }
@@ -88,11 +88,11 @@ mod wasm_app {
         selected_chip: Option<Rc<ChipDesc>>,
         /// Chip search query
         chip_search: String,
-        /// Download data
-        download_data: Option<Vec<u8>>,
-        /// Download filename
-        download_filename: String,
-        /// Start address for download
+        /// File data to upload to device
+        upload_file_data: Option<Vec<u8>>,
+        /// Upload filename
+        upload_filename: String,
+        /// Start address for upload
         start_address: String,
         /// Address mode (3 or 4)
         address_mode: u8,
@@ -108,7 +108,6 @@ mod wasm_app {
     enum Panel {
         #[default]
         Device,
-        Memory,
         Debug,
     }
 
@@ -135,19 +134,14 @@ mod wasm_app {
                 available_chips,
                 selected_chip: None,
                 chip_search: String::new(),
-                download_data: None,
-                download_filename: String::new(),
+                upload_file_data: None,
+                upload_filename: String::new(),
                 start_address: "0".to_string(),
                 address_mode: 3,
                 current_panel: Panel::Device,
                 status_message: "Click 'Connect Device' to connect via WebUSB".to_string(),
                 status_is_error: false,
             }
-        }
-
-        fn set_status(&mut self, message: &str, is_error: bool) {
-            self.status_message = message.to_string();
-            self.status_is_error = is_error;
         }
 
         fn request_device(&mut self) {
@@ -212,16 +206,22 @@ mod wasm_app {
             );
 
             spawn_local(async move {
-                let result = {
+                // Take device out of state to avoid holding borrow across await
+                let device = {
                     let mut s = state.borrow_mut();
-                    if let Some(ref mut device) = s.device {
-                        Some(device.set_state(running).await)
-                    } else {
-                        None
-                    }
+                    s.device.take()
                 };
 
+                let (result, device) = if let Some(mut dev) = device {
+                    let res = dev.set_state(running).await;
+                    (Some(res), Some(dev))
+                } else {
+                    (None, None)
+                };
+
+                // Put device back and update state
                 let mut s = state.borrow_mut();
+                s.device = device;
                 match result {
                     Some(Ok(_)) => {
                         s.is_running = running;
@@ -244,21 +244,67 @@ mod wasm_app {
             });
         }
 
+        fn set_address_mode(&mut self, mode: u8) {
+            let state = self.state.clone();
+            state.borrow_mut().async_op =
+                AsyncOp::InProgress(format!("Setting {}-byte address mode...", mode));
+
+            spawn_local(async move {
+                // Take device out of state to avoid holding borrow across await
+                let device = {
+                    let mut s = state.borrow_mut();
+                    s.device.take()
+                };
+
+                let (result, device) = if let Some(mut dev) = device {
+                    let res = dev.set_address_mode(mode).await;
+                    (Some(res), Some(dev))
+                } else {
+                    (None, None)
+                };
+
+                // Put device back and update state
+                let mut s = state.borrow_mut();
+                s.device = device;
+                match result {
+                    Some(Ok(_)) => {
+                        s.async_op = AsyncOp::Success(format!(
+                            "Address mode set to {}-byte",
+                            mode
+                        ));
+                    }
+                    Some(Err(e)) => {
+                        s.async_op =
+                            AsyncOp::Error(format!("Failed to set address mode: {}", e));
+                    }
+                    None => {
+                        s.async_op = AsyncOp::Error("No device connected".to_string());
+                    }
+                }
+            });
+        }
+
         fn set_hold_pin(&mut self, hold_state: HoldPinState) {
             let state = self.state.clone();
             state.borrow_mut().async_op = AsyncOp::InProgress("Setting hold pin...".to_string());
 
             spawn_local(async move {
-                let result = {
+                // Take device out of state to avoid holding borrow across await
+                let device = {
                     let mut s = state.borrow_mut();
-                    if let Some(ref mut device) = s.device {
-                        Some(device.set_hold_pin_state(hold_state).await)
-                    } else {
-                        None
-                    }
+                    s.device.take()
                 };
 
+                let (result, device) = if let Some(mut dev) = device {
+                    let res = dev.set_hold_pin_state(hold_state).await;
+                    (Some(res), Some(dev))
+                } else {
+                    (None, None)
+                };
+
+                // Put device back and update state
                 let mut s = state.borrow_mut();
+                s.device = device;
                 match result {
                     Some(Ok(_)) => {
                         s.hold_pin_state = hold_state;
@@ -371,8 +417,8 @@ mod wasm_app {
             input.click();
         }
 
-        fn download_to_device(&mut self) {
-            let data = match &self.download_data {
+        fn upload_to_device(&mut self) {
+            let data = match &self.upload_file_data {
                 Some(d) => d.clone(),
                 None => return,
             };
@@ -383,8 +429,8 @@ mod wasm_app {
             {
                 let mut s = state.borrow_mut();
                 s.progress = 0.0;
-                s.progress_message = "Downloading...".to_string();
-                s.async_op = AsyncOp::InProgress("Downloading data to device...".to_string());
+                s.progress_message = "Uploading to device...".to_string();
+                s.async_op = AsyncOp::InProgress("Uploading data to device...".to_string());
             }
 
             spawn_local(async move {
@@ -395,6 +441,8 @@ mod wasm_app {
                 };
 
                 let (result, device) = if let Some(mut dev) = device {
+                    // Stop emulation before writing to memory
+                    let _ = dev.set_state(false).await;
                     let res = dev.download(&data, start_addr).await;
                     (Some(res), Some(dev))
                 } else {
@@ -407,10 +455,16 @@ mod wasm_app {
                 s.progress = 1.0;
                 match result {
                     Some(Ok(_)) => {
-                        s.async_op = AsyncOp::Success("Download complete".to_string());
+                        // Emulation was stopped before upload
+                        s.is_running = false;
+                        s.async_op = AsyncOp::Success(
+                            "Upload complete. Emulation stopped - press Start to resume."
+                                .to_string(),
+                        );
                     }
                     Some(Err(e)) => {
-                        s.async_op = AsyncOp::Error(format!("Download failed: {}", e));
+                        s.is_running = false;
+                        s.async_op = AsyncOp::Error(format!("Upload failed: {}", e));
                     }
                     None => {
                         s.async_op = AsyncOp::Error("No device connected".to_string());
@@ -419,7 +473,7 @@ mod wasm_app {
             });
         }
 
-        fn upload_from_device(&mut self) {
+        fn download_from_device(&mut self) {
             let size = self
                 .selected_chip
                 .as_ref()
@@ -431,8 +485,9 @@ mod wasm_app {
             {
                 let mut s = state.borrow_mut();
                 s.progress = 0.0;
-                s.progress_message = "Uploading...".to_string();
-                s.async_op = AsyncOp::InProgress("Uploading data from device...".to_string());
+                s.progress_message = "Downloading from device...".to_string();
+                s.async_op =
+                    AsyncOp::InProgress("Downloading data from device...".to_string());
             }
 
             spawn_local(async move {
@@ -455,17 +510,51 @@ mod wasm_app {
                 s.progress = 1.0;
                 match result {
                     Some(Ok(data)) => {
-                        s.upload_data = Some(data);
-                        s.async_op = AsyncOp::Success("Upload complete".to_string());
+                        s.download_data = Some(data);
+                        s.async_op = AsyncOp::Success("Download complete".to_string());
                     }
                     Some(Err(e)) => {
-                        s.async_op = AsyncOp::Error(format!("Upload failed: {}", e));
+                        s.async_op = AsyncOp::Error(format!("Download failed: {}", e));
                     }
                     None => {
                         s.async_op = AsyncOp::Error("No device connected".to_string());
                     }
                 }
             });
+        }
+
+        /// Save data to a file using browser download
+        fn save_file_browser(data: &[u8], filename: &str) {
+            let uint8_array = js_sys::Uint8Array::from(data);
+            let array = js_sys::Array::new();
+            array.push(&uint8_array.buffer());
+
+            let options = web_sys::BlobPropertyBag::new();
+            options.set_type("application/octet-stream");
+
+            let blob =
+                web_sys::Blob::new_with_u8_array_sequence_and_options(&array, &options).unwrap();
+
+            let url = web_sys::Url::create_object_url_with_blob(&blob).unwrap();
+
+            let window = web_sys::window().unwrap();
+            let document = window.document().unwrap();
+            let a = document
+                .create_element("a")
+                .unwrap()
+                .dyn_into::<web_sys::HtmlAnchorElement>()
+                .unwrap();
+
+            a.set_href(&url);
+            a.set_download(filename);
+            a.style().set_property("display", "none").unwrap();
+
+            let body = document.body().unwrap();
+            body.append_child(&a).unwrap();
+            a.click();
+            body.remove_child(&a).unwrap();
+
+            web_sys::Url::revoke_object_url(&url).unwrap();
         }
 
         /// Render device panel
@@ -612,21 +701,25 @@ mod wasm_app {
                 }
 
                 ui.add_space(8.0);
+                let mut address_mode_to_set: Option<u8> = None;
                 ui.horizontal(|ui| {
                     ui.label("Address Mode:");
                     if ui
                         .selectable_value(&mut self.address_mode, 3, "3-byte")
                         .clicked()
                     {
-                        // TODO: Send to device
+                        address_mode_to_set = Some(3);
                     }
                     if ui
                         .selectable_value(&mut self.address_mode, 4, "4-byte")
                         .clicked()
                     {
-                        // TODO: Send to device
+                        address_mode_to_set = Some(4);
                     }
                 });
+                if let Some(mode) = address_mode_to_set {
+                    self.set_address_mode(mode);
+                }
 
                 ui.add_space(8.0);
 
@@ -643,7 +736,7 @@ mod wasm_app {
 
                 // Custom combo-box-like button
                 let button = egui::Button::new(egui::RichText::new(format!("{} ▼", selected_text)))
-                    .min_size(egui::vec2(400.0, 0.0));
+                    .min_size(egui::vec2(500.0, 0.0));
                 let response = ui.add(button);
 
                 if response.clicked() {
@@ -658,7 +751,7 @@ mod wasm_app {
                     &response,
                     egui::popup::PopupCloseBehavior::CloseOnClickOutside,
                     |ui| {
-                        ui.set_min_width(400.0);
+                        ui.set_min_width(500.0);
 
                         // Search filter - always request focus so it's ready for typing
                         let search_response = ui.add(
@@ -672,7 +765,7 @@ mod wasm_app {
                         // Filter and display chips using pre-computed names
                         let search_lower = self.chip_search.to_lowercase();
                         egui::ScrollArea::vertical()
-                            .max_height(400.0)
+                            .max_height(500.0)
                             .show(ui, |ui| {
                                 for chip_info in &self.available_chips {
                                     if search_lower.is_empty()
@@ -712,18 +805,24 @@ mod wasm_app {
                 let state = self.state.borrow();
                 let progress = state.progress;
                 let progress_message = state.progress_message.clone();
-                let upload_data_len = state.upload_data.as_ref().map(|d| d.len());
+                let is_busy = matches!(state.async_op, AsyncOp::InProgress(_));
+                let download_data_len = state.download_data.as_ref().map(|d| d.len());
+                // Clone download data for save button (only when needed)
+                let download_data_for_save = state.download_data.clone();
                 drop(state);
 
-                // Download to Device
-                ui.label("Download to Device:");
+                // Upload to Device
+                ui.label("Upload to Device:");
                 ui.horizontal(|ui| {
-                    if ui.button("Select File...").clicked() {
+                    if ui
+                        .add_enabled(!is_busy, egui::Button::new("Select File..."))
+                        .clicked()
+                    {
                         self.select_file();
                     }
-                    if !self.download_filename.is_empty() {
-                        ui.label(&self.download_filename);
-                        if let Some(ref data) = self.download_data {
+                    if !self.upload_filename.is_empty() {
+                        ui.label(&self.upload_filename);
+                        if let Some(ref data) = self.upload_file_data {
                             ui.label(format!("({} bytes)", data.len()));
                         }
                     }
@@ -735,52 +834,54 @@ mod wasm_app {
                 });
 
                 ui.horizontal(|ui| {
-                    let can_download = self.download_data.is_some();
+                    let can_upload = self.upload_file_data.is_some() && !is_busy;
                     if ui
-                        .add_enabled(can_download, egui::Button::new("Download"))
+                        .add_enabled(can_upload, egui::Button::new("Upload"))
                         .clicked()
                     {
-                        self.download_to_device();
+                        self.upload_to_device();
+                    }
+                    if is_busy && progress > 0.0 && progress < 1.0 {
+                        ui.spinner();
                     }
                 });
 
                 ui.add_space(8.0);
+                ui.separator();
 
-                // Upload from Device
-                ui.label("Upload from Device:");
+                // Download from Device
+                ui.label("Download from Device:");
                 ui.horizontal(|ui| {
-                    if ui.button("Upload").clicked() {
-                        self.upload_from_device();
+                    if ui
+                        .add_enabled(!is_busy, egui::Button::new("Download"))
+                        .clicked()
+                    {
+                        self.download_from_device();
                     }
-                    if let Some(len) = upload_data_len {
+                    if let Some(len) = download_data_len {
                         ui.label(format!("{} bytes", len));
-                        // TODO: Add save button that downloads via JS blob
+                        if ui.button("Save As...").clicked() {
+                            if let Some(ref data) = download_data_for_save {
+                                let filename = self
+                                    .selected_chip
+                                    .as_ref()
+                                    .map(|c| format!("{}.bin", c.name))
+                                    .unwrap_or_else(|| "memory.bin".to_string());
+                                Self::save_file_browser(data, &filename);
+                            }
+                        }
+                    }
+                    if is_busy && progress > 0.0 && progress < 1.0 {
+                        ui.spinner();
                     }
                 });
 
                 // Progress bar
-                if progress > 0.0 && progress < 1.0 {
+                if is_busy && progress > 0.0 && progress < 1.0 {
                     ui.add_space(8.0);
                     ui.add(egui::ProgressBar::new(progress).text(&progress_message));
                 }
             }
-        }
-
-        /// Render memory panel
-        fn memory_panel(&mut self, ui: &mut egui::Ui) {
-            ui.heading("Memory Operations");
-            ui.separator();
-
-            let state = self.state.borrow();
-            let is_connected = matches!(state.connection_state, ConnectionState::Connected);
-            drop(state);
-
-            if !is_connected {
-                ui.label("Connect to a device first.");
-                return;
-            }
-
-            ui.label("Memory operations are available in the Device panel under Control.");
         }
 
         /// Render debug panel
@@ -808,8 +909,8 @@ mod wasm_app {
                 if let Some((filename, data)) = state.pending_file.take() {
                     self.status_message = format!("Loaded {} ({} bytes)", filename, data.len());
                     self.status_is_error = false;
-                    self.download_filename = filename;
-                    self.download_data = Some(data);
+                    self.upload_filename = filename;
+                    self.upload_file_data = Some(data);
                 }
             }
 
@@ -859,7 +960,6 @@ mod wasm_app {
             // Central panel
             egui::CentralPanel::default().show(ctx, |ui| match self.current_panel {
                 Panel::Device => self.device_panel(ui),
-                Panel::Memory => self.memory_panel(ui),
                 Panel::Debug => self.debug_panel(ui),
             });
 
