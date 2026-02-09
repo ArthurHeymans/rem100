@@ -65,6 +65,8 @@ Then open http://127.0.0.1:8080 in Chrome or Edge (WebUSB is not supported in Fi
 
 For detailed web interface documentation including architecture, feature flags, and development setup, see [README-web.md](README-web.md).
 
+You can find a prebuild version at https://rem100.9elements.com
+
 ## Usage
 
 Example:
