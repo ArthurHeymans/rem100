@@ -24,7 +24,7 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: Build WASM with Trunk
-        run: nix develop --command trunk build --release
+        run: nix develop --command trunk build --release --public-url /rem100/
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
