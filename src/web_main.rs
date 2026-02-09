@@ -604,6 +604,15 @@ mod wasm_app {
                 }
                 ConnectionState::Error(e) => {
                     ui.label(egui::RichText::new(format!("Error: {}", e)).color(Color32::RED));
+                    ui.add_space(4.0);
+                    ui.label("On Linux, ensure udev rules grant access to the EM100:");
+                    ui.code(
+                        "echo 'SUBSYSTEM==\"usb\", ATTR{idVendor}==\"04b4\", \
+                         ATTR{idProduct}==\"1235\", MODE=\"0666\", TAG+=\"uaccess\"' \
+                         | sudo tee /etc/udev/rules.d/99-em100.rules\n\
+                         sudo udevadm control --reload-rules && sudo udevadm trigger",
+                    );
+                    ui.label("Then unplug and replug the EM100.");
                 }
             }
 
