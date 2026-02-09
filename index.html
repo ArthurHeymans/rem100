@@ -7,10 +7,6 @@
     <link data-trunk rel="css" href="assets/style.css">
 </head>
 <body>
-    <div id="webusb-warning" class="webusb-warning">
-        WebUSB is not supported in this browser. Please use Chrome, Edge, or Opera.
-    </div>
-    
     <div id="loading">
         <h1>EM100Pro Control</h1>
         <div class="spinner"></div>
@@ -22,18 +18,6 @@
     <link data-trunk rel="rust" data-wasm-opt="s" data-bin="rem100-web" data-cargo-features="web" data-cargo-no-default-features />
     
     <script>
-        // Check for WebUSB support
-        if (!navigator.usb) {
-            var warning = document.getElementById('webusb-warning');
-            // Brave exposes navigator.brave
-            if (navigator.brave && typeof navigator.brave.isBrave === 'function') {
-                warning.innerHTML =
-                    'WebUSB is blocked by Brave shields. Click the Brave icon in the address bar ' +
-                    'and disable shields for this site, then reload the page.';
-            }
-            warning.classList.add('show');
-        }
-        
         // Hide loading screen when WASM is ready
         window.addEventListener('load', function() {
             // Give a small delay for WASM initialization
