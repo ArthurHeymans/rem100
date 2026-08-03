@@ -333,7 +333,7 @@ fn read_report_buffer(em100: &Em100) -> Result<[[u8; REPORT_BUFFER_LENGTH]; REPO
 
     let mut reportdata = [[0u8; REPORT_BUFFER_LENGTH]; REPORT_BUFFER_COUNT];
 
-    for report in 0..REPORT_BUFFER_COUNT {
+    for report in &mut reportdata {
         let data = usb::get_response(em100, REPORT_BUFFER_LENGTH)?;
         if data.len() != REPORT_BUFFER_LENGTH {
             return Err(Error::Communication(format!(
@@ -342,7 +342,7 @@ fn read_report_buffer(em100: &Em100) -> Result<[[u8; REPORT_BUFFER_LENGTH]; REPO
                 REPORT_BUFFER_LENGTH
             )));
         }
-        reportdata[report][..].copy_from_slice(&data);
+        report.copy_from_slice(&data);
     }
 
     Ok(reportdata)
@@ -357,8 +357,7 @@ pub fn read_spi_trace(
 ) -> Result<bool> {
     let reportdata = read_report_buffer(em100)?;
 
-    for report in 0..REPORT_BUFFER_COUNT {
-        let data = &reportdata[report];
+    for data in &reportdata {
         let count = ((data[0] as usize) << 8) | (data[1] as usize);
         if count == 0 {
             continue;
@@ -620,8 +619,7 @@ pub fn read_spi_trace_console(
 
     let reportdata = read_report_buffer(em100)?;
 
-    for report in 0..REPORT_BUFFER_COUNT {
-        let data = &reportdata[report];
+    for data in &reportdata {
         let count = ((data[0] as usize) << 8) | (data[1] as usize);
         if count == 0 {
             continue;

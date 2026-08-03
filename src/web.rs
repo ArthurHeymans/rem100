@@ -3,7 +3,7 @@
 //! This module provides a web-based GUI that mirrors the CLI functionality.
 
 use crate::chips::ChipDesc;
-use crate::device::{list_devices, DeviceInfo, Em100, HoldPinState};
+use crate::device::{DeviceInfo, Em100, HoldPinState, list_devices};
 use crate::sdram::{read_sdram_with_progress, write_sdram_with_progress};
 use egui::{Color32, RichText};
 use std::sync::{Arc, Mutex};
@@ -182,10 +182,9 @@ impl Em100App {
                 let _ = em100.set_state(false);
                 let res = em100.set_chip_type(&chip);
                 // Auto-enable 4-byte mode for large chips
-                if res.is_ok() && chip.size > 16 * 1024 * 1024 {
-                    if em100.set_address_mode(4).is_ok() {
-                        self.address_mode = 4;
-                    }
+                if res.is_ok() && chip.size > 16 * 1024 * 1024 && em100.set_address_mode(4).is_ok()
+                {
+                    self.address_mode = 4;
                 }
                 res
             } else {
@@ -316,15 +315,13 @@ impl Em100App {
             if ui.button("Refresh Devices").clicked() {
                 self.refresh_devices();
             }
-            if self.device.is_some() {
-                if ui.button("Disconnect").clicked() {
-                    self.disconnect_device();
-                }
+            if self.device.is_some() && ui.button("Disconnect").clicked() {
+                self.disconnect_device();
             }
         });
 
         // Collect device info first to avoid borrow issues
-        let devices: Vec<_> = self.available_devices.iter().cloned().collect();
+        let devices: Vec<_> = self.available_devices.to_vec();
 
         if !devices.is_empty() {
             ui.add_space(8.0);

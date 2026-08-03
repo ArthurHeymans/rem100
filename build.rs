@@ -20,7 +20,7 @@ fn download_configs() -> io::Result<Vec<u8>> {
     );
 
     // Try to download using curl
-    let output = Command::new("curl").args(&["-L", "-o", "-", &url]).output();
+    let output = Command::new("curl").args(["-L", "-o", "-", &url]).output();
 
     match output {
         Ok(output) if output.status.success() => Ok(output.stdout),
@@ -100,7 +100,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             chips
         }
         Err(_) => {
-            println!("cargo:warning=Generated empty chip data (build environment issue prevents download)");
+            println!(
+                "cargo:warning=Generated empty chip data (build environment issue prevents download)"
+            );
             Vec::new()
         }
     };

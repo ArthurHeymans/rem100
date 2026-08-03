@@ -79,15 +79,15 @@ pub mod web_device;
 #[cfg(target_arch = "wasm32")]
 pub mod web_usb;
 
-pub use chips::{parse_dcfg, ChipDatabase, ChipDesc};
+pub use chips::{ChipDatabase, ChipDesc, parse_dcfg};
 pub use error::{Error, Result};
 
 // Re-exports for native platforms only
 #[cfg(not(target_arch = "wasm32"))]
-pub use device::{list_devices, DebugInfo, DeviceInfo, Em100, HoldPinState, HwVersion, Voltages};
+pub use device::{DebugInfo, DeviceInfo, Em100, HoldPinState, HwVersion, Voltages, list_devices};
 #[cfg(not(target_arch = "wasm32"))]
 pub use firmware::{
-    firmware_read, firmware_to_dpfw, firmware_write, validate_firmware, FirmwareInfo,
+    FirmwareInfo, firmware_read, firmware_to_dpfw, firmware_write, validate_firmware,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use sdram::{read_sdram_with_progress, write_sdram_with_progress, ProgressCallback};
+pub use sdram::{ProgressCallback, read_sdram_with_progress, write_sdram_with_progress};

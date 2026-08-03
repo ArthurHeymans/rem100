@@ -17,7 +17,7 @@ enum IfdVersion {
 /// SPI frequency settings
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
-#[allow(dead_code)]
+#[allow(dead_code, clippy::enum_variant_names)]
 enum SpiFrequency {
     Freq20MHz = 0,
     Freq33MHz = 1,
@@ -28,12 +28,9 @@ enum SpiFrequency {
 
 /// Find flash descriptor in image
 fn find_fd(image: &[u8]) -> Option<usize> {
-    for i in (0..image.len().saturating_sub(4)).step_by(4) {
-        if LittleEndian::read_u32(&image[i..]) == FD_SIGNATURE {
-            return Some(i);
-        }
-    }
-    None
+    (0..image.len().saturating_sub(4))
+        .step_by(4)
+        .find(|&i| LittleEndian::read_u32(&image[i..]) == FD_SIGNATURE)
 }
 
 /// Get IFD version from FCBA
