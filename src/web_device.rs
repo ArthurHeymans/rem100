@@ -132,66 +132,10 @@ impl Em100Async {
     /// This must be called from a user gesture (e.g., button click) in the browser.
     #[cfg(target_arch = "wasm32")]
     pub async fn request_device() -> Result<nusb::DeviceInfo> {
-        use wasm_bindgen::JsCast;
-        use wasm_bindgen_futures::JsFuture;
-        use web_sys::{UsbDevice, UsbDeviceFilter, UsbDeviceRequestOptions};
-
-        web_sys::console::log_1(&"request_device: starting...".into());
-
-        let usb = web_sys::window()
-            .ok_or(Error::DeviceNotFound)?
-            .navigator()
-            .usb();
-
-        // Create filter for EM100 devices
-        let filter = UsbDeviceFilter::new();
-        filter.set_vendor_id(VENDOR_ID);
-        filter.set_product_id(PRODUCT_ID);
-
-        let filters = js_sys::Array::new();
-        filters.push(&filter);
-
-        let options = UsbDeviceRequestOptions::new(&filters);
-
-        web_sys::console::log_1(&"request_device: calling usb.request_device()...".into());
-
-        // request_device returns a Promise that resolves to a UsbDevice
-        let device_promise = usb.request_device(&options);
-
-        let device_js = JsFuture::from(device_promise).await.map_err(|e| {
-            let err = format!("WebUSB request failed: {:?}", e);
-            web_sys::console::error_1(&err.clone().into());
-            Error::Communication(err)
-        })?;
-
-        web_sys::console::log_1(&"request_device: got device from picker".into());
-
-        // Cast to UsbDevice
-        let device: UsbDevice = device_js
-            .dyn_into()
-            .map_err(|_| Error::Communication("Failed to get USB device".to_string()))?;
-
-        web_sys::console::log_1(
-            &format!(
-                "request_device: device vid=0x{:04x} pid=0x{:04x} opened={}",
-                device.vendor_id(),
-                device.product_id(),
-                device.opened()
-            )
-            .into(),
-        );
-
-        // Use nusb's function to create DeviceInfo from the already-granted device
-        web_sys::console::log_1(&"request_device: calling device_info_from_webusb...".into());
-
-        let device_info = nusb::device_info_from_webusb(device).await.map_err(|e| {
-            let err = format!("Failed to get device info: {}", e);
-            web_sys::console::error_1(&err.clone().into());
-            Error::Communication(err)
-        })?;
-
-        web_sys::console::log_1(&"request_device: success!".into());
-        Ok(device_info)
+        let selector = nusb::DeviceSelector::all().with_vid_pid(VENDOR_ID, PRODUCT_ID);
+        nusb::request_device(&[selector])
+            .await?
+            .ok_or(Error::DeviceNotFound)
     }
 
     /// Open an EM100 device from a DeviceInfo
