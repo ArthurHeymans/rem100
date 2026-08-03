@@ -6,14 +6,14 @@
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
     env_logger::init();
-    rem100::web::run()
+    em100::web::run()
 }
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_app {
     use egui::Color32;
-    use rem100::chips::{ChipDatabase, ChipDesc};
-    use rem100::web_device::{DeviceInfo, Em100Async, HoldPinState};
+    use em100::chips::{ChipDatabase, ChipDesc};
+    use em100::web_device::{DeviceInfo, Em100Async, HoldPinState};
     use std::cell::RefCell;
     use std::rc::Rc;
     use wasm_bindgen::closure::Closure;

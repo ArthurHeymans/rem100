@@ -246,69 +246,41 @@ fn parse_srst(data: &[u8], chip: &mut ChipDesc, entries: usize) -> Result<usize>
     Ok(len)
 }
 
-/// Chip configuration database (CLI version with file loading)
-#[cfg(feature = "cli")]
+/// Chip configuration database.
 pub struct ChipDatabase {
-    pub configs: TarFile,
+    pub chips: Vec<ChipDesc>,
     pub version: String,
 }
 
-#[cfg(feature = "cli")]
+// Include the generated chip data at module level.
+include!(concat!(env!("OUT_DIR"), "/chip_data.rs"));
+
 impl ChipDatabase {
-    /// Load chip database from configs.tar.xz
+    /// Load chip database from configs.tar.xz.
+    #[cfg(feature = "cli")]
     pub fn load() -> Result<Self> {
         let config_path = get_em100_file("configs.tar.xz")?;
         let configs = TarFile::load_compressed(&config_path)?;
 
-        // Read version
         let version_data = configs.find("configs/VERSION")?;
         let version = String::from_utf8_lossy(&version_data).trim().to_string();
-
-        Ok(Self { configs, version })
-    }
-
-    /// Find a chip by name
-    pub fn find_chip(&self, name: &str) -> Result<ChipDesc> {
-        let cfg_name = format!("configs/{}.cfg", name);
-        let data = self
-            .configs
-            .find(&cfg_name)
-            .map_err(|_| Error::InvalidChip(format!("Could not find chip '{}'", name)))?;
-        parse_dcfg(&data)
-    }
-
-    /// List all available chips
-    pub fn list_chips(&self) -> Vec<ChipDesc> {
         let mut chips = Vec::new();
-        for entry in self.configs.entries() {
+
+        for entry in configs.entries() {
             if entry.ends_with(".cfg") {
-                if let Ok(data) = self.configs.find(entry) {
+                if let Ok(data) = configs.find(entry) {
                     if let Ok(chip) = parse_dcfg(&data) {
                         chips.push(chip);
                     }
                 }
             }
         }
-        chips
+        chips.sort_by(|a, b| a.vendor.cmp(&b.vendor).then(a.name.cmp(&b.name)));
+
+        Ok(Self { chips, version })
     }
-}
 
-/// In-memory chip database (for web)
-#[cfg(not(feature = "cli"))]
-pub struct ChipDatabase {
-    pub chips: Vec<ChipDesc>,
-    pub version: String,
-}
-
-// Include the generated chip data at module level
-#[cfg(not(feature = "cli"))]
-include!(concat!(env!("OUT_DIR"), "/chip_data.rs"));
-
-#[cfg(not(feature = "cli"))]
-impl ChipDatabase {
-    /// Load chip database from embedded data
-    ///
-    /// Chip configurations are embedded at build time from configs.tar.xz
+    /// Load chip database from embedded data.
     pub fn load_embedded() -> Self {
         let mut chips = Vec::new();
         for (_name, data) in EMBEDDED_CHIP_CONFIGS {
@@ -316,8 +288,6 @@ impl ChipDatabase {
                 chips.push(chip);
             }
         }
-
-        // Sort chips by vendor and name for better UX
         chips.sort_by(|a, b| a.vendor.cmp(&b.vendor).then(a.name.cmp(&b.name)));
 
         Self {
@@ -326,7 +296,7 @@ impl ChipDatabase {
         }
     }
 
-    /// Create chip database from in-memory data
+    /// Create chip database from in-memory data.
     pub fn from_data(chip_configs: Vec<(&str, &[u8])>, version: String) -> Result<Self> {
         let mut chips = Vec::new();
         for (_name, data) in chip_configs {
@@ -337,7 +307,7 @@ impl ChipDatabase {
         Ok(Self { chips, version })
     }
 
-    /// Find a chip by name
+    /// Find a chip by name.
     pub fn find_chip(&self, name: &str) -> Result<ChipDesc> {
         self.chips
             .iter()
@@ -346,7 +316,7 @@ impl ChipDatabase {
             .ok_or_else(|| Error::InvalidChip(format!("Could not find chip '{}'", name)))
     }
 
-    /// List all available chips
+    /// List all available chips.
     pub fn list_chips(&self) -> Vec<ChipDesc> {
         self.chips.clone()
     }

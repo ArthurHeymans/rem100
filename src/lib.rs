@@ -1,7 +1,34 @@
-//! rem100 - EM100Pro SPI flash emulator command-line utility
+//! Rust library for controlling Dediprog EM100Pro SPI flash emulators.
 //!
-//! A Rust port of the em100 utility for controlling the Dediprog EM100Pro
-//! SPI flash emulator hardware.
+//! The crates.io package is named `rem100`; its library crate is named `em100`.
+//! The package also provides the `rem100` command-line utility.
+//!
+//! Library-only users should disable the default `cli` feature:
+//!
+//! ```toml
+//! [dependencies]
+//! rem100 = { version = "0.1", default-features = false }
+//! ```
+//!
+//! # Example
+//!
+//! ```no_run
+//! use em100::{list_devices, Em100, Result};
+//!
+//! fn main() -> Result<()> {
+//!     for (bus, address, serial) in list_devices()? {
+//!         println!("{bus}:{address} {serial}");
+//!     }
+//!
+//!     let device = Em100::open(None, None, None)?;
+//!     println!("{}", device.serial_string());
+//!     Ok(())
+//! }
+//! ```
+//!
+//! The `cli` feature enables the command-line binary and CLI-only downloading
+//! and archive helpers. The `web` feature enables the egui interface; on
+//! `wasm32-unknown-unknown`, USB access uses WebUSB through `nusb`.
 //!
 //! Copyright 2012-2019 Google Inc.
 //! Rust port copyright 2024
