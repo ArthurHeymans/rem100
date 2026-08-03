@@ -923,17 +923,11 @@ mod wasm_app {
                     egui::Button::new(egui::RichText::new(format!("{} ▼", selected_text)))
                         .min_size(egui::vec2(500.0, 0.0)),
                 );
-                if response.clicked() {
-                    ui.memory_mut(|mem| mem.toggle_popup(popup_id));
-                }
-
                 let search_field_id = ui.make_persistent_id("chip_search_field");
-                egui::popup::popup_below_widget(
-                    ui,
-                    popup_id,
-                    &response,
-                    egui::popup::PopupCloseBehavior::CloseOnClickOutside,
-                    |ui| {
+                egui::Popup::from_toggle_button_response(&response)
+                    .id(popup_id)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| {
                         ui.set_min_width(500.0);
                         let search_response = ui.add(
                             egui::TextEdit::singleline(&mut self.chip_search)
@@ -965,13 +959,12 @@ mod wasm_app {
                                             .clicked()
                                         {
                                             chip_to_set = Some(Rc::clone(&chip_info.chip));
-                                            ui.memory_mut(|mem| mem.close_popup());
+                                            egui::Popup::close_id(ui.ctx(), popup_id);
                                         }
                                     }
                                 }
                             });
-                    },
-                );
+                    });
                 if let Some(chip) = chip_to_set {
                     self.set_chip(chip);
                 }

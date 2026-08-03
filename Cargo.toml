@@ -42,8 +42,8 @@ ctrlc = { version = "3", optional = true }
 indicatif = { version = "0.18", optional = true }
 
 # Web/GUI dependencies
-eframe = { version = "0.29", optional = true, default-features = false, features = ["default_fonts", "glow", "persistence"] }
-egui = { version = "0.29", optional = true }
+eframe = { version = "0.32", optional = true, default-features = false, features = ["default_fonts", "glow", "persistence", "x11", "wayland"] }
+egui = { version = "0.32", optional = true }
 
 # nusb runs blocking syscalls (open, claim_interface, ...) on an IO thread
 # when awaited; without a runtime feature awaiting them panics.
