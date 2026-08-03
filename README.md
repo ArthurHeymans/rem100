@@ -1,6 +1,11 @@
-# rem100: EM100-Pro command-line utility (Rust port)
+# rem100: EM100-Pro library and command-line utility
 
-This is a Rust port of the em100 utility for controlling the Dediprog EM100-Pro [1] in Linux. It supports both the original version and the new -G2 variant.
+`rem100` provides both:
+
+- the `em100` Rust library for controlling Dediprog EM100-Pro hardware; and
+- the `rem100` command-line utility built on that library.
+
+It supports both the original EM100-Pro and the newer EM100-Pro-G2.
 
 The 'em100' device provides a way to emulate a SPI-flash chip. Various connectors are available to allow it to take over from the in-circuit SPI chip so that the SoC sees the em100's internal memory as the contents of the SPI flash. Images can be loaded into the em100 over USB in a few seconds, thus providing a much faster development cycle than is possible by reprogramming the SPI flash each time.
 
@@ -27,15 +32,48 @@ sudo udevadm trigger
 
 Then unplug and replug the EM100.
 
-## Building
+## Installation and library use
 
-### CLI
+### Command-line utility
+
+Install the `rem100` binary from crates.io:
 
 ```bash
-cargo build --release --features cli
+cargo install rem100
+```
+
+For a local build:
+
+```bash
+cargo build --release --bin rem100
 ```
 
 The binary will be available at `target/release/rem100`.
+
+### Rust library
+
+The crates.io package is named `rem100`, while its library crate is named `em100`. Disable the default `cli` feature when only the library is needed:
+
+```toml
+[dependencies]
+rem100 = { version = "0.1", default-features = false }
+```
+
+```rust,no_run
+use em100::{list_devices, Em100, Result};
+
+fn main() -> Result<()> {
+    for (bus, address, serial) in list_devices()? {
+        println!("{bus}:{address} {serial}");
+    }
+
+    let device = Em100::open(None, None, None)?;
+    println!("{}", device.serial_string());
+    Ok(())
+}
+```
+
+The core native library API does not require the `cli` feature. CLI-only downloading and archive helpers are behind `cli`.
 
 ### Web Interface
 
@@ -44,7 +82,7 @@ A GUI interface is available in two variants:
 #### Native Desktop GUI
 
 ```bash
-cargo run --features web --no-default-features --bin rem100-web
+cargo run --no-default-features --features native-gui --bin rem100-web
 ```
 
 #### Web (WASM) Interface
@@ -59,17 +97,18 @@ cargo install trunk
 trunk serve
 ```
 
-Then open http://127.0.0.1:8080 in Chrome or Edge (WebUSB is not supported in Firefox).
+Then open <http://127.0.0.1:8081> in Chrome or Edge (WebUSB is not supported in Firefox).
 
 **Note:** The Linux udev rules above are also required for the web interface.
 
 For detailed web interface documentation including architecture, feature flags, and development setup, see [README-web.md](README-web.md).
 
-You can find a prebuild version at https://rem100.9elements.com
+A prebuilt web version is available at <https://rem100.9elements.com>.
 
 ## Usage
 
 Example:
+
 ```bash
 rem100 --stop --set M25P80 -d file.bin -v --start -t -O 0xfff00000
 ```
@@ -112,4 +151,4 @@ This project is licensed under the GNU General Public License v2.0 only - see th
 
 ## References
 
-[1] https://www.dediprog.com/product/EM100Pro-G2
+[1] <https://www.dediprog.com/product/EM100Pro-G2>
