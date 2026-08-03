@@ -4,16 +4,16 @@
 //! SPI flash emulator hardware.
 
 use clap::Parser;
-use rem100::chips::ChipDatabase;
-use rem100::device::{list_devices, Em100, HoldPinState};
-use rem100::download::update_all_files;
-use rem100::firmware::{firmware_dump, firmware_update};
-use rem100::image::autocorrect_image;
-use rem100::trace::{self, TraceState};
+use em100::chips::ChipDatabase;
+use em100::device::{Em100, HoldPinState, list_devices};
+use em100::download::update_all_files;
+use em100::firmware::{firmware_dump, firmware_update};
+use em100::image::autocorrect_image;
+use em100::trace::{self, TraceState};
 use std::fs::File;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// EM100Pro command-line utility
 #[derive(Parser, Debug)]
@@ -257,9 +257,8 @@ fn main() {
         Err(_) => println!("EM100Pro state unknown"),
     }
 
-    match em100.get_hold_pin_state() {
-        Ok(state) => println!("EM100Pro hold pin currently {}", state),
-        Err(_) => {}
+    if let Ok(state) = em100.get_hold_pin_state() {
+        println!("EM100Pro hold pin currently {}", state)
     }
     println!();
 

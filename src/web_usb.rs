@@ -4,8 +4,8 @@
 //! with the WebUSB API in browsers.
 
 use crate::error::{Error, Result};
-use nusb::transfer::{Buffer, Bulk, In, Out};
 use nusb::Endpoint;
+use nusb::transfer::{Buffer, Bulk, In, Out};
 
 /// Round up to the next multiple of max packet size for IN transfers
 fn round_up_to_max_packet(len: usize, max_packet_size: usize) -> usize {

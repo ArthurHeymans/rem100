@@ -151,7 +151,7 @@ fn compute_checksum(header: &[u8]) -> u32 {
     let mut sum: u32 = 256; // Checksum field treated as spaces
 
     for (i, &byte) in header.iter().enumerate() {
-        if i >= 148 && i < 156 {
+        if (148..156).contains(&i) {
             // Skip checksum field
             continue;
         }

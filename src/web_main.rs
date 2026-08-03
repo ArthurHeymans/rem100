@@ -6,18 +6,18 @@
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
     env_logger::init();
-    rem100::web::run()
+    em100::web::run()
 }
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_app {
     use egui::Color32;
-    use rem100::chips::{ChipDatabase, ChipDesc};
-    use rem100::web_device::{DeviceInfo, Em100Async, HoldPinState};
+    use em100::chips::{ChipDatabase, ChipDesc};
+    use em100::web_device::{DeviceInfo, Em100Async, HoldPinState};
     use std::cell::RefCell;
     use std::rc::Rc;
-    use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
     use wasm_bindgen_futures::spawn_local;
     use web_sys::HtmlInputElement;
 
@@ -57,7 +57,7 @@ mod wasm_app {
         async_op: AsyncOp,
         progress: f32,
         progress_message: String,
-        download_data: Option<Vec<u8>>,  // data downloaded from device
+        download_data: Option<Vec<u8>>, // data downloaded from device
         pending_file: Option<(String, Vec<u8>)>, // (filename, data) from file picker
     }
 
@@ -268,14 +268,10 @@ mod wasm_app {
                 s.device = device;
                 match result {
                     Some(Ok(_)) => {
-                        s.async_op = AsyncOp::Success(format!(
-                            "Address mode set to {}-byte",
-                            mode
-                        ));
+                        s.async_op = AsyncOp::Success(format!("Address mode set to {}-byte", mode));
                     }
                     Some(Err(e)) => {
-                        s.async_op =
-                            AsyncOp::Error(format!("Failed to set address mode: {}", e));
+                        s.async_op = AsyncOp::Error(format!("Failed to set address mode: {}", e));
                     }
                     None => {
                         s.async_op = AsyncOp::Error("No device connected".to_string());
@@ -486,8 +482,7 @@ mod wasm_app {
                 let mut s = state.borrow_mut();
                 s.progress = 0.0;
                 s.progress_message = "Downloading from device...".to_string();
-                s.async_op =
-                    AsyncOp::InProgress("Downloading data from device...".to_string());
+                s.async_op = AsyncOp::InProgress("Downloading data from device...".to_string());
             }
 
             spawn_local(async move {

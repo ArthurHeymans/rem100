@@ -14,8 +14,8 @@ watch = ["src", "index.html", "Trunk.toml"]
 ignore = ["target", "dist"]
 
 [serve]
-# The address to serve on
-address = "127.0.0.1"
+# The addresses to serve on
+addresses = ["127.0.0.1"]
 # The port to serve on
 port = 8081
 # Open browser automatically

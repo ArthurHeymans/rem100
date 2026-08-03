@@ -505,8 +505,8 @@ impl Em100 {
         system::set_led(self, system::LedState::GreenOn)?;
 
         let mut fpga_registers = [0u16; 128];
-        for i in 0..128 {
-            fpga_registers[i] = fpga::read_fpga_register(self, (i * 2) as u8).unwrap_or(0xFFFF);
+        for (i, register) in fpga_registers.iter_mut().enumerate() {
+            *register = fpga::read_fpga_register(self, (i * 2) as u8).unwrap_or(0xFFFF);
         }
 
         Ok(DebugInfo {

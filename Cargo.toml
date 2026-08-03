@@ -1,23 +1,26 @@
 [package]
 name = "rem100"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 authors = ["Google Inc.", "Rust port contributors"]
-description = "EM100Pro SPI flash emulator command-line utility"
+description = "Rust library and command-line utility for the Dediprog EM100Pro SPI flash emulator"
 license = "GPL-2.0-only"
-repository = "https://github.com/user/rem100"
+repository = "https://github.com/ArthurHeymans/rem100"
+documentation = "https://docs.rs/rem100"
+rust-version = "1.85"
 keywords = ["em100", "spi", "flash", "emulator", "dediprog"]
 categories = ["command-line-utilities", "hardware-support"]
+exclude = [".github/", ".envrc", "dist/", "flake.lock", "flake.nix"]
 
 [features]
 default = ["cli"]
 cli = ["clap", "ctrlc", "indicatif", "reqwest", "xz2", "tar", "dirs"]
 web = ["eframe", "egui", "poll-promise", "env_logger"]
-native-gui = ["web", "rfd/xdg-portal", "rfd/tokio"]
+native-gui = ["web", "rfd/xdg-portal"]
 
 [dependencies]
-# USB communication with WebUSB support
-nusb = { git = "https://github.com/ArthurHeymans/nusb.git", branch = "task/webusb-rebased" }
+# USB communication (native USB and browser WebUSB)
+nusb = "0.2.6"
 futures-lite = "2"
 
 # Error handling
@@ -40,14 +43,15 @@ indicatif = { version = "0.17", optional = true }
 eframe = { version = "0.29", optional = true, default-features = false, features = ["default_fonts", "glow", "persistence"] }
 egui = { version = "0.29", optional = true }
 poll-promise = { version = "0.3", optional = true, features = ["web"] }
-rfd = { version = "0.15", optional = true, default-features = false, features = ["xdg-portal", "tokio"] }
+rfd = { version = "0.17", optional = true, default-features = false, features = ["xdg-portal"] }
 env_logger = { version = "0.11", optional = true }
 
 # Web-specific dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = [
+# nusb 0.2.6 requires the typed WebUSB bindings from these releases.
+wasm-bindgen = "0.2.126"
+wasm-bindgen-futures = "0.4.76"
+web-sys = { version = "0.3.103", features = [
     "console",
     "Window",
     "Document",
@@ -87,7 +91,7 @@ web-sys = { version = "0.3", features = [
     "UsbConnectionEvent",
     "UsbConnectionEventInit",
 ] }
-js-sys = "0.3"
+js-sys = "0.3.103"
 console_error_panic_hook = "0.1"
 tracing-wasm = "0.2"
 getrandom = { version = "0.2", features = ["js"] }
@@ -104,7 +108,12 @@ path = "src/web_main.rs"
 required-features = ["web"]
 
 [lib]
+name = "em100"
 crate-type = ["cdylib", "rlib"]
+
+[package.metadata.docs.rs]
+no-default-features = true
+targets = ["x86_64-unknown-linux-gnu"]
 
 [profile.release]
 opt-level = 3
