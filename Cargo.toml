@@ -2,7 +2,7 @@
 name = "rem100"
 version = "0.1.0"
 edition = "2024"
-authors = ["Google Inc.", "Rust port contributors"]
+authors = ["Arthur Heymans"]
 description = "Rust library and command-line utility for the Dediprog EM100Pro SPI flash emulator"
 license = "GPL-2.0-only"
 repository = "https://github.com/ArthurHeymans/rem100"
