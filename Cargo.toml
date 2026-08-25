@@ -35,7 +35,7 @@ clap = { version = "4", features = ["derive"], optional = true }
 reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false, optional = true }
 xz2 = { version = "0.1", optional = true }
 tar = { version = "0.4", optional = true }
-dirs = { version = "5", optional = true }
+dirs = { version = "6", optional = true }
 ctrlc = { version = "3", optional = true }
 indicatif = { version = "0.17", optional = true }
 
