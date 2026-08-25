@@ -7,7 +7,9 @@ use crate::error::{Error, Result};
 use crate::fpga;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::protocol::fpga::Register;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::protocol::trace as command;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::spi;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::usb;

@@ -7,8 +7,9 @@ use crate::chips::ChipDesc;
 use crate::error::{Error, Result};
 use crate::protocol::{
     chip as chip_command, fpga as fpga_command, fpga::Register, sdram as sdram_command,
-    spi as spi_command, system as system_command,
+    spi as spi_command, system as system_command, trace as trace_command,
 };
+use crate::trace::{REPORT_BUFFER_COUNT, REPORT_BUFFER_LENGTH, validate_spi_trace_report};
 use crate::web_usb;
 use nusb::transfer::{Bulk, In, Out};
 use nusb::{Endpoint, Interface};
@@ -315,6 +316,27 @@ impl Em100Async {
         )
         .await?;
         Ok(())
+    }
+
+    /// Clear the FPGA SPI trace buffer.
+    pub async fn reset_spi_trace(&mut self) -> Result<()> {
+        web_usb::send_command(&mut self.endpoint_out, trace_command::reset()).await
+    }
+
+    /// Fetch one complete set of SPI trace report buffers.
+    pub async fn read_spi_trace_reports(&mut self) -> Result<Vec<Vec<u8>>> {
+        web_usb::send_command(
+            &mut self.endpoint_out,
+            trace_command::read(REPORT_BUFFER_COUNT as u8, 0x15),
+        )
+        .await?;
+
+        let mut reports = Vec::with_capacity(REPORT_BUFFER_COUNT);
+        for _ in 0..REPORT_BUFFER_COUNT {
+            let report = web_usb::get_response(&mut self.endpoint_in, REPORT_BUFFER_LENGTH).await?;
+            reports.push(validate_spi_trace_report(report)?);
+        }
+        Ok(reports)
     }
 
     /// Get current hold pin state

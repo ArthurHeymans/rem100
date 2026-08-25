@@ -13,6 +13,7 @@ fn main() -> eframe::Result<()> {
 mod wasm_app {
     use egui::Color32;
     use em100::chips::{ChipDatabase, ChipDesc};
+    use em100::trace::{TraceEvent, TraceState, decode_spi_trace_reports};
     use em100::web_device::{DeviceInfo, Em100Async, HoldPinState};
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -59,6 +60,9 @@ mod wasm_app {
         progress_message: String,
         download_data: Option<Vec<u8>>, // data downloaded from device
         pending_file: Option<(String, Vec<u8>)>, // (filename, data) from file picker
+        trace_running: bool,
+        trace_generation: u64,
+        trace_output: String,
     }
 
     impl Default for SharedState {
@@ -74,6 +78,9 @@ mod wasm_app {
                 progress_message: String::new(),
                 download_data: None,
                 pending_file: None,
+                trace_running: false,
+                trace_generation: 0,
+                trace_output: String::new(),
             }
         }
     }
@@ -96,6 +103,10 @@ mod wasm_app {
         start_address: String,
         /// Address mode (3 or 4)
         address_mode: u8,
+        /// Compact trace output
+        trace_brief: bool,
+        /// Address offset applied to trace output
+        trace_address_offset: String,
         /// Current panel
         current_panel: Panel,
         /// Status message
@@ -109,6 +120,7 @@ mod wasm_app {
         #[default]
         Device,
         Debug,
+        Trace,
     }
 
     impl Em100WebApp {
@@ -138,6 +150,8 @@ mod wasm_app {
                 upload_filename: String::new(),
                 start_address: "0".to_string(),
                 address_mode: 3,
+                trace_brief: false,
+                trace_address_offset: "0".to_string(),
                 current_panel: Panel::Device,
                 status_message: "Click 'Connect Device' to connect via WebUSB".to_string(),
                 status_is_error: false,
@@ -187,7 +201,14 @@ mod wasm_app {
         }
 
         fn disconnect(&mut self) {
+            if self.state.borrow().trace_running {
+                self.state.borrow_mut().async_op =
+                    AsyncOp::Error("Stop trace capture before disconnecting".to_string());
+                return;
+            }
             let mut s = self.state.borrow_mut();
+            s.trace_running = false;
+            s.trace_generation = s.trace_generation.wrapping_add(1);
             s.device = None;
             s.device_info = None;
             s.connection_state = ConnectionState::Disconnected;
@@ -195,6 +216,12 @@ mod wasm_app {
         }
 
         fn set_emulation_state(&mut self, running: bool) {
+            if self.state.borrow().trace_running {
+                self.state.borrow_mut().async_op = AsyncOp::Error(
+                    "Stop trace capture before changing emulation state".to_string(),
+                );
+                return;
+            }
             let state = self.state.clone();
             state.borrow_mut().async_op = AsyncOp::InProgress(
                 if running {
@@ -246,6 +273,11 @@ mod wasm_app {
 
         fn set_address_mode(&mut self, mode: u8) {
             let state = self.state.clone();
+            if state.borrow().trace_running {
+                state.borrow_mut().async_op =
+                    AsyncOp::Error("Stop trace capture before changing address mode".to_string());
+                return;
+            }
             state.borrow_mut().async_op =
                 AsyncOp::InProgress(format!("Setting {}-byte address mode...", mode));
 
@@ -282,6 +314,11 @@ mod wasm_app {
 
         fn set_hold_pin(&mut self, hold_state: HoldPinState) {
             let state = self.state.clone();
+            if state.borrow().trace_running {
+                state.borrow_mut().async_op =
+                    AsyncOp::Error("Stop trace capture before changing the hold pin".to_string());
+                return;
+            }
             state.borrow_mut().async_op = AsyncOp::InProgress("Setting hold pin...".to_string());
 
             spawn_local(async move {
@@ -318,6 +355,11 @@ mod wasm_app {
 
         fn set_chip(&mut self, chip: Rc<ChipDesc>) {
             let state = self.state.clone();
+            if state.borrow().trace_running {
+                state.borrow_mut().async_op =
+                    AsyncOp::Error("Stop trace capture before changing chips".to_string());
+                return;
+            }
             let chip_for_async = chip.clone();
             state.borrow_mut().async_op =
                 AsyncOp::InProgress(format!("Setting chip to {} {}...", chip.vendor, chip.name));
@@ -330,7 +372,7 @@ mod wasm_app {
                 };
 
                 let (result, device) = if let Some(mut dev) = device {
-                    let res = dev.set_chip_type(&*chip_for_async).await;
+                    let res = dev.set_chip_type(&chip_for_async).await;
                     (Some(res), Some(dev))
                 } else {
                     (None, None)
@@ -363,6 +405,115 @@ mod wasm_app {
             });
 
             self.selected_chip = Some(chip);
+        }
+
+        fn start_trace(&mut self, ctx: &egui::Context) {
+            let address_offset = match parse_hex(&self.trace_address_offset) {
+                Some(offset) => offset,
+                None => {
+                    self.state.borrow_mut().async_op =
+                        AsyncOp::Error("Invalid trace address offset".to_string());
+                    return;
+                }
+            };
+
+            let generation = {
+                let mut s = self.state.borrow_mut();
+                if s.trace_running {
+                    return;
+                }
+                s.trace_generation = s.trace_generation.wrapping_add(1);
+                s.trace_running = true;
+                s.async_op = AsyncOp::InProgress("Starting SPI trace capture...".to_string());
+                s.trace_generation
+            };
+
+            let state = self.state.clone();
+            let repaint = ctx.clone();
+            let brief = self.trace_brief;
+            let address_mode = self.address_mode;
+            spawn_local(async move {
+                let mut device = state.borrow_mut().device.take();
+                let reset_result = match device.as_mut() {
+                    Some(device) => device.reset_spi_trace().await,
+                    None => Err(em100::Error::DeviceNotFound),
+                };
+                state.borrow_mut().device = device;
+
+                if let Err(error) = reset_result {
+                    let mut s = state.borrow_mut();
+                    s.trace_running = false;
+                    s.async_op = AsyncOp::Error(format!("Failed to start trace: {error}"));
+                    repaint.request_repaint();
+                    return;
+                }
+
+                state.borrow_mut().async_op =
+                    AsyncOp::Success("SPI trace capture started".to_string());
+                let mut decoder = TraceState::new(brief, address_mode);
+
+                loop {
+                    let keep_running = {
+                        let s = state.borrow();
+                        s.trace_running && s.trace_generation == generation
+                    };
+                    if !keep_running {
+                        break;
+                    }
+
+                    let mut device = state.borrow_mut().device.take();
+                    let reports = match device.as_mut() {
+                        Some(device) => device.read_spi_trace_reports().await,
+                        None => Err(em100::Error::DeviceNotFound),
+                    };
+                    state.borrow_mut().device = device;
+
+                    match reports.and_then(|reports| {
+                        decode_spi_trace_reports(&reports, &mut decoder, address_offset)
+                    }) {
+                        Ok(events) => {
+                            let output: String = events
+                                .into_iter()
+                                .filter_map(|event| match event {
+                                    TraceEvent::Output(output) => Some(output),
+                                    TraceEvent::Timestamp => None,
+                                })
+                                .collect();
+                            if !output.is_empty() {
+                                let mut s = state.borrow_mut();
+                                s.trace_output.push_str(&output);
+                                trim_trace_output(&mut s.trace_output);
+                            }
+                        }
+                        Err(error) => {
+                            let mut s = state.borrow_mut();
+                            s.trace_running = false;
+                            s.async_op = AsyncOp::Error(format!("Trace capture failed: {error}"));
+                            repaint.request_repaint();
+                            return;
+                        }
+                    }
+                    repaint.request_repaint();
+                }
+
+                let mut device = state.borrow_mut().device.take();
+                if let Some(device) = device.as_mut() {
+                    let _ = device.reset_spi_trace().await;
+                }
+                let mut s = state.borrow_mut();
+                s.device = device;
+                s.trace_running = false;
+                s.async_op = AsyncOp::Success("SPI trace capture stopped".to_string());
+                repaint.request_repaint();
+            });
+        }
+
+        fn stop_trace(&mut self) {
+            let mut s = self.state.borrow_mut();
+            if s.trace_running {
+                s.trace_generation = s.trace_generation.wrapping_add(1);
+                s.async_op = AsyncOp::InProgress("Stopping SPI trace capture...".to_string());
+            }
         }
 
         fn select_file(&mut self) {
@@ -560,6 +711,8 @@ mod wasm_app {
             let state = self.state.borrow();
             let is_connected = matches!(state.connection_state, ConnectionState::Connected);
             let is_connecting = matches!(state.connection_state, ConnectionState::Connecting);
+            let connection_busy =
+                state.trace_running || matches!(state.async_op, AsyncOp::InProgress(_));
             drop(state);
 
             // Connect/disconnect buttons
@@ -574,7 +727,10 @@ mod wasm_app {
                     self.request_device();
                 }
                 if ui
-                    .add_enabled(is_connected, egui::Button::new("Disconnect"))
+                    .add_enabled(
+                        is_connected && !connection_busy,
+                        egui::Button::new("Disconnect"),
+                    )
                     .clicked()
                 {
                     self.disconnect();
@@ -809,7 +965,8 @@ mod wasm_app {
                 let state = self.state.borrow();
                 let progress = state.progress;
                 let progress_message = state.progress_message.clone();
-                let is_busy = matches!(state.async_op, AsyncOp::InProgress(_));
+                let is_busy =
+                    matches!(state.async_op, AsyncOp::InProgress(_)) || state.trace_running;
                 let download_data_len = state.download_data.as_ref().map(|d| d.len());
                 // Clone download data for save button (only when needed)
                 let download_data_for_save = state.download_data.clone();
@@ -888,6 +1045,64 @@ mod wasm_app {
             }
         }
 
+        fn trace_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+            ui.heading("SPI Trace");
+            ui.separator();
+
+            let state = self.state.borrow();
+            let is_connected = matches!(state.connection_state, ConnectionState::Connected);
+            let trace_running = state.trace_running;
+            let is_busy = matches!(state.async_op, AsyncOp::InProgress(_));
+            drop(state);
+
+            if !is_connected {
+                ui.label("Connect to a device first.");
+                return;
+            }
+
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!trace_running && !is_busy, egui::Button::new("Start Trace"))
+                    .clicked()
+                {
+                    self.start_trace(ctx);
+                }
+                if ui
+                    .add_enabled(trace_running, egui::Button::new("Stop Trace"))
+                    .clicked()
+                {
+                    self.stop_trace();
+                }
+                if ui.button("Clear").clicked() {
+                    self.state.borrow_mut().trace_output.clear();
+                }
+            });
+
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(!trace_running, |ui| {
+                    ui.checkbox(&mut self.trace_brief, "Brief");
+                    ui.label("Address offset:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.trace_address_offset)
+                            .desired_width(120.0),
+                    );
+                });
+            });
+
+            ui.add_space(8.0);
+            egui::ScrollArea::vertical()
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    let mut state = self.state.borrow_mut();
+                    ui.add(
+                        egui::TextEdit::multiline(&mut state.trace_output)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(f32::INFINITY)
+                            .interactive(false),
+                    );
+                });
+        }
+
         /// Render debug panel
         fn debug_panel(&mut self, ui: &mut egui::Ui) {
             ui.heading("Debug Information");
@@ -945,6 +1160,7 @@ mod wasm_app {
                     ui.separator();
 
                     ui.selectable_value(&mut self.current_panel, Panel::Device, "Device");
+                    ui.selectable_value(&mut self.current_panel, Panel::Trace, "Trace");
                     ui.selectable_value(&mut self.current_panel, Panel::Debug, "Debug");
                 });
             });
@@ -964,6 +1180,7 @@ mod wasm_app {
             // Central panel
             egui::CentralPanel::default().show(ctx, |ui| match self.current_panel {
                 Panel::Device => self.device_panel(ui),
+                Panel::Trace => self.trace_panel(ui, ctx),
                 Panel::Debug => self.debug_panel(ui),
             });
 
@@ -971,10 +1188,24 @@ mod wasm_app {
             let state = self.state.borrow();
             if matches!(state.async_op, AsyncOp::InProgress(_))
                 || matches!(state.connection_state, ConnectionState::Connecting)
+                || state.trace_running
             {
-                ctx.request_repaint();
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
             }
         }
+    }
+
+    fn trim_trace_output(output: &mut String) {
+        const MAX_TRACE_OUTPUT: usize = 2 * 1024 * 1024;
+        if output.len() <= MAX_TRACE_OUTPUT {
+            return;
+        }
+        let excess = output.len() - MAX_TRACE_OUTPUT;
+        let boundary = output[excess..]
+            .find('\n')
+            .map(|offset| excess + offset + 1)
+            .unwrap_or(excess);
+        output.drain(..boundary);
     }
 
     /// Parse hex string (with or without 0x prefix)

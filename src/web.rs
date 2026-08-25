@@ -5,7 +5,10 @@
 use crate::chips::ChipDesc;
 use crate::device::{DeviceInfo, Em100, HoldPinState, list_devices};
 use crate::sdram::{read_sdram_with_progress, write_sdram_with_progress};
+use crate::trace::{self, TraceState};
 use egui::{Color32, RichText};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 
 /// Application state
@@ -53,6 +56,16 @@ pub struct Em100App {
     debug_info: Option<crate::device::DebugInfo>,
     /// Trace output buffer
     trace_buffer: String,
+    /// Whether trace output should use the compact format
+    trace_brief: bool,
+    /// Address offset applied to decoded trace addresses
+    trace_address_offset: String,
+    /// Shared stop flag for the trace worker
+    trace_running: Arc<AtomicBool>,
+    /// True until the trace worker has released the USB device
+    trace_worker_active: Arc<AtomicBool>,
+    /// Output from the trace worker
+    trace_receiver: Option<Receiver<Result<String, String>>>,
     /// Current panel
     current_panel: Panel,
 }
@@ -78,6 +91,7 @@ impl Em100App {
         Self {
             address_mode: 3,
             start_address: "0".to_string(),
+            trace_address_offset: "0".to_string(),
             available_chips,
             chip_db_version,
             ..Default::default()
@@ -99,6 +113,13 @@ impl Em100App {
 
     /// Connect to a device
     fn connect_device(&mut self, bus: u8, addr: u8) {
+        if self.trace_worker_active.load(Ordering::Acquire) {
+            self.set_status(
+                "Wait for trace capture to stop before switching devices",
+                true,
+            );
+            return;
+        }
         match Em100::open(Some(bus), Some(addr), None) {
             Ok(em100) => {
                 let info = em100.get_info();
@@ -116,6 +137,11 @@ impl Em100App {
 
     /// Disconnect from device
     fn disconnect_device(&mut self) {
+        if self.trace_worker_active.load(Ordering::Acquire) {
+            self.set_status("Wait for trace capture to stop before disconnecting", true);
+            return;
+        }
+        self.stop_trace();
         self.device = None;
         self.device_info = None;
         self.set_status("Disconnected", false);
@@ -123,6 +149,10 @@ impl Em100App {
 
     /// Set emulation state
     fn set_emulation_state(&mut self, running: bool) {
+        if self.trace_running.load(Ordering::Relaxed) {
+            self.set_status("Stop trace capture before changing emulation state", true);
+            return;
+        }
         let result = if let Some(ref device) = self.device {
             if let Ok(em100) = device.lock() {
                 em100.set_state(running)
@@ -153,6 +183,10 @@ impl Em100App {
 
     /// Set hold pin state
     fn set_hold_pin(&mut self, state: HoldPinState) {
+        if self.trace_running.load(Ordering::Relaxed) {
+            self.set_status("Stop trace capture before changing the hold pin", true);
+            return;
+        }
         let result = if let Some(ref device) = self.device {
             if let Ok(em100) = device.lock() {
                 em100.set_hold_pin_state(state)
@@ -176,6 +210,10 @@ impl Em100App {
 
     /// Set chip type
     fn set_chip(&mut self, chip: ChipDesc) {
+        if self.trace_running.load(Ordering::Relaxed) {
+            self.set_status("Stop trace capture before changing chips", true);
+            return;
+        }
         let result = if let Some(ref device) = self.device {
             if let Ok(mut em100) = device.lock() {
                 // Stop emulation before changing chip type (matches CLI --stop --set pattern)
@@ -309,13 +347,23 @@ impl Em100App {
     fn device_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Device");
         ui.separator();
+        let trace_worker_active = self.trace_worker_active.load(Ordering::Acquire);
 
         // Device list
         ui.horizontal(|ui| {
-            if ui.button("Refresh Devices").clicked() {
+            if ui
+                .add_enabled(!trace_worker_active, egui::Button::new("Refresh Devices"))
+                .clicked()
+            {
                 self.refresh_devices();
             }
-            if self.device.is_some() && ui.button("Disconnect").clicked() {
+            if ui
+                .add_enabled(
+                    self.device.is_some() && !trace_worker_active,
+                    egui::Button::new("Disconnect"),
+                )
+                .clicked()
+            {
                 self.disconnect_device();
             }
         });
@@ -330,7 +378,13 @@ impl Em100App {
                 let label = format!("Bus {:03} Device {:03}: {}", bus, addr, serial);
                 let is_selected = self.selected_device == Some(i);
 
-                if ui.selectable_label(is_selected, &label).clicked() {
+                if ui
+                    .add_enabled_ui(!trace_worker_active, |ui| {
+                        ui.selectable_label(is_selected, &label)
+                    })
+                    .inner
+                    .clicked()
+                {
                     self.selected_device = Some(i);
                     self.connect_device(*bus, *addr);
                 }
@@ -518,6 +572,10 @@ impl Em100App {
             ui.label("Connect to a device first.");
             return;
         }
+        if self.trace_running.load(Ordering::Relaxed) {
+            ui.label("Stop trace capture before performing memory operations.");
+            return;
+        }
 
         ui.separator();
 
@@ -657,6 +715,116 @@ impl Em100App {
         }
     }
 
+    fn start_trace(&mut self) {
+        let Some(device) = self.device.clone() else {
+            return;
+        };
+        let Some(address_offset) = parse_hex(&self.trace_address_offset) else {
+            self.set_status("Invalid trace address offset", true);
+            return;
+        };
+
+        if self.trace_worker_active.load(Ordering::Acquire) {
+            self.set_status("Wait for the previous trace capture to stop", true);
+            return;
+        }
+        let running = Arc::new(AtomicBool::new(true));
+        let worker_running = running.clone();
+        let worker_active = Arc::new(AtomicBool::new(true));
+        let active_flag = worker_active.clone();
+        let (sender, receiver) = mpsc::channel();
+        let brief = self.trace_brief;
+        let address_mode = self.address_mode;
+
+        std::thread::spawn(move || {
+            let reset_result = device
+                .lock()
+                .map_err(|_| "Device lock poisoned".to_string())
+                .and_then(|em100| trace::reset_spi_trace(&em100).map_err(|e| e.to_string()));
+            if let Err(error) = reset_result {
+                let _ = sender.send(Err(error));
+                worker_running.store(false, Ordering::Relaxed);
+                active_flag.store(false, Ordering::Release);
+                return;
+            }
+
+            let mut decoder = TraceState::new(brief, address_mode);
+            while worker_running.load(Ordering::Relaxed) {
+                let result = device
+                    .lock()
+                    .map_err(|_| "Device lock poisoned".to_string())
+                    .and_then(|em100| {
+                        trace::read_spi_trace_output(&em100, &mut decoder, address_offset)
+                            .map_err(|e| e.to_string())
+                    });
+                match result {
+                    Ok(output) if output.is_empty() => {}
+                    Ok(output) => {
+                        if sender.send(Ok(output)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(Err(error));
+                        break;
+                    }
+                }
+            }
+            if let Ok(em100) = device.lock() {
+                let _ = trace::reset_spi_trace(&em100);
+            }
+            worker_running.store(false, Ordering::Relaxed);
+            active_flag.store(false, Ordering::Release);
+        });
+
+        self.trace_running = running;
+        self.trace_worker_active = worker_active;
+        self.trace_receiver = Some(receiver);
+        self.set_status("SPI trace capture started", false);
+    }
+
+    fn stop_trace(&mut self) {
+        self.trace_running.store(false, Ordering::Relaxed);
+    }
+
+    fn poll_trace_output(&mut self) {
+        let Some(receiver) = &self.trace_receiver else {
+            return;
+        };
+
+        let mut error = None;
+        while let Ok(result) = receiver.try_recv() {
+            match result {
+                Ok(output) => {
+                    self.trace_buffer.push_str(&output);
+                    const MAX_TRACE_OUTPUT: usize = 2 * 1024 * 1024;
+                    if self.trace_buffer.len() > MAX_TRACE_OUTPUT {
+                        let excess = self.trace_buffer.len() - MAX_TRACE_OUTPUT;
+                        let boundary = self.trace_buffer[excess..]
+                            .find('\n')
+                            .map(|offset| excess + offset + 1)
+                            .unwrap_or(excess);
+                        self.trace_buffer.drain(..boundary);
+                    }
+                }
+                Err(message) => error = Some(message),
+            }
+        }
+        let failed = error.is_some();
+        if let Some(message) = error {
+            self.stop_trace();
+            self.set_status(&format!("Trace capture failed: {message}"), true);
+        }
+        if !self.trace_worker_active.load(Ordering::Acquire)
+            && !self.trace_running.load(Ordering::Relaxed)
+        {
+            self.trace_receiver = None;
+            if !failed && !self.status_is_error {
+                self.set_status("SPI trace capture stopped", false);
+            }
+        }
+    }
+
     /// Render trace panel
     fn trace_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("SPI Trace");
@@ -667,14 +835,35 @@ impl Em100App {
             return;
         }
 
+        let is_tracing = self.trace_running.load(Ordering::Relaxed);
+        let worker_active = self.trace_worker_active.load(Ordering::Acquire);
         ui.horizontal(|ui| {
-            if ui.button("Start Trace").clicked() {
-                // TODO: Implement trace mode
-                self.set_status("Trace mode not yet implemented for web", true);
+            if ui
+                .add_enabled(!worker_active, egui::Button::new("Start Trace"))
+                .clicked()
+            {
+                self.start_trace();
+            }
+            if ui
+                .add_enabled(is_tracing, egui::Button::new("Stop Trace"))
+                .clicked()
+            {
+                self.stop_trace();
+                self.set_status("Stopping SPI trace capture...", false);
             }
             if ui.button("Clear").clicked() {
                 self.trace_buffer.clear();
             }
+        });
+
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(!worker_active, |ui| {
+                ui.checkbox(&mut self.trace_brief, "Brief");
+                ui.label("Address offset:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.trace_address_offset).desired_width(120.0),
+                );
+            });
         });
 
         ui.add_space(8.0);
@@ -682,9 +871,10 @@ impl Em100App {
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 ui.add(
-                    egui::TextEdit::multiline(&mut self.trace_buffer.as_str())
+                    egui::TextEdit::multiline(&mut self.trace_buffer)
                         .font(egui::TextStyle::Monospace)
-                        .desired_width(f32::INFINITY),
+                        .desired_width(f32::INFINITY)
+                        .interactive(false),
                 );
             });
     }
@@ -717,6 +907,8 @@ impl Em100App {
 
 impl eframe::App for Em100App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_trace_output();
+
         // Top panel with navigation
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -751,6 +943,10 @@ impl eframe::App for Em100App {
             Panel::Firmware => self.firmware_panel(ui),
             Panel::Debug => self.debug_panel(ui),
         });
+
+        if self.trace_worker_active.load(Ordering::Acquire) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
     }
 }
 
