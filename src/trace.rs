@@ -1,17 +1,34 @@
 //! SPI trace related operations
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::device::Em100;
 use crate::error::{Error, Result};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::fpga;
-use crate::protocol::{fpga::Register, trace as command};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::protocol::fpga::Register;
+use crate::protocol::trace as command;
 use crate::spi;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::usb;
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::{self, Write};
 
 /// Report buffer length
-const REPORT_BUFFER_LENGTH: usize = 8192;
+pub const REPORT_BUFFER_LENGTH: usize = 8192;
 /// Number of report buffers
-const REPORT_BUFFER_COUNT: usize = 8;
+pub const REPORT_BUFFER_COUNT: usize = 8;
+
+pub(crate) fn validate_spi_trace_report(report: Vec<u8>) -> Result<Vec<u8>> {
+    if report.len() != REPORT_BUFFER_LENGTH {
+        return Err(Error::Communication(format!(
+            "Report length = {} instead of {}",
+            report.len(),
+            REPORT_BUFFER_LENGTH
+        )));
+    }
+    Ok(report)
+}
 
 /// EM100 specific command
 pub const EM100_SPECIFIC_CMD: u8 = 0x11;
@@ -289,6 +306,13 @@ pub struct TraceState {
     brief: bool,
 }
 
+/// A decoded trace event. Output fragments preserve the CLI's streaming format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TraceEvent {
+    Output(String),
+    Timestamp,
+}
+
 impl Default for TraceState {
     fn default() -> Self {
         Self {
@@ -317,19 +341,36 @@ impl TraceState {
 }
 
 /// Reset SPI trace buffer
+#[cfg(not(target_arch = "wasm32"))]
 pub fn reset_spi_trace(em100: &Em100) -> Result<()> {
     usb::send_command(em100, command::reset())?;
     Ok(())
 }
 
 /// Read report buffer from device
-fn read_report_buffer(em100: &Em100) -> Result<[[u8; REPORT_BUFFER_LENGTH]; REPORT_BUFFER_COUNT]> {
+#[cfg(not(target_arch = "wasm32"))]
+fn read_report_buffer(em100: &Em100) -> Result<Vec<Vec<u8>>> {
     usb::send_command(em100, command::read(REPORT_BUFFER_COUNT as u8, 0x15))?;
 
-    let mut reportdata = [[0u8; REPORT_BUFFER_LENGTH]; REPORT_BUFFER_COUNT];
+    let mut reportdata = Vec::with_capacity(REPORT_BUFFER_COUNT);
+    for _ in 0..REPORT_BUFFER_COUNT {
+        let report = usb::get_response(em100, REPORT_BUFFER_LENGTH)?;
+        reportdata.push(validate_spi_trace_report(report)?);
+    }
+    Ok(reportdata)
+}
 
-    for report in &mut reportdata {
-        let data = usb::get_response(em100, REPORT_BUFFER_LENGTH)?;
+/// Decode raw SPI trace report buffers without performing any I/O.
+///
+/// This is shared by the CLI, native GUI, and browser WebUSB implementation.
+pub fn decode_spi_trace_reports(
+    reportdata: &[Vec<u8>],
+    state: &mut TraceState,
+    addr_offset: u64,
+) -> Result<Vec<TraceEvent>> {
+    let mut events = Vec::new();
+
+    for data in reportdata {
         if data.len() != REPORT_BUFFER_LENGTH {
             return Err(Error::Communication(format!(
                 "Report length = {} instead of {}",
@@ -337,70 +378,42 @@ fn read_report_buffer(em100: &Em100) -> Result<[[u8; REPORT_BUFFER_LENGTH]; REPO
                 REPORT_BUFFER_LENGTH
             )));
         }
-        report.copy_from_slice(&data);
-    }
 
-    Ok(reportdata)
-}
-
-/// Read SPI trace data
-pub fn read_spi_trace(
-    em100: &Em100,
-    state: &mut TraceState,
-    display_terminal: bool,
-    addr_offset: u64,
-) -> Result<bool> {
-    let reportdata = read_report_buffer(em100)?;
-
-    for data in &reportdata {
-        let count = ((data[0] as usize) << 8) | (data[1] as usize);
-        if count == 0 {
-            continue;
-        }
-        let count = count.min(1023);
-
+        let count = (((data[0] as usize) << 8) | data[1] as usize).min(1023);
         for i in 0..count {
             let mut j = state.additional_pad_bytes;
             state.additional_pad_bytes = 0;
             let cmd = data[2 + i * 8];
 
             if cmd == 0x00 {
-                // Packet without valid data
                 continue;
             }
             if cmd == 0xff {
-                // Timestamp
                 state.timestamp = (data[2 + i * 8 + 2] as u64) << 40
                     | (data[2 + i * 8 + 3] as u64) << 32
                     | (data[2 + i * 8 + 4] as u64) << 24
                     | (data[2 + i * 8 + 5] as u64) << 16
                     | (data[2 + i * 8 + 6] as u64) << 8
-                    | (data[2 + i * 8 + 7] as u64);
-                if display_terminal {
-                    read_spi_terminal(em100, true)?;
-                }
+                    | data[2 + i * 8 + 7] as u64;
+                events.push(TraceEvent::Timestamp);
                 continue;
             }
 
-            // Data packet
             if cmd != state.cmdid {
                 let spi_command = data[i * 8 + 4];
                 let spi_cmd_vals = get_command_vals(spi_command);
-
                 state.cmdid = cmd;
+
                 if state.counter == 0 {
                     state.start_timestamp = state.timestamp;
                 }
-
-                // Special commands
                 match spi_command {
                     0xb7 => state.address_mode = 4,
                     0xe9 => state.address_mode = 3,
                     _ => {}
                 }
 
-                j = 1; // Skip command byte
-
+                j = 1;
                 let address_bytes = match spi_cmd_vals.address_type {
                     AddressType::Dynamic => state.address_mode,
                     AddressType::NoOff3B | AddressType::Addr3B => 3,
@@ -411,49 +424,44 @@ pub fn read_spi_trace(
                 if address_bytes == 3 {
                     state.address = ((data[i * 8 + 5] as u64) << 16)
                         | ((data[i * 8 + 6] as u64) << 8)
-                        | (data[i * 8 + 7] as u64);
+                        | data[i * 8 + 7] as u64;
                 } else if address_bytes == 4 {
                     state.address = ((data[i * 8 + 5] as u64) << 24)
                         | ((data[i * 8 + 6] as u64) << 16)
                         | ((data[i * 8 + 7] as u64) << 8)
-                        | (data[i * 8 + 8] as u64);
+                        | data[i * 8 + 8] as u64;
                 }
-
-                state.address &= 0xffffffff;
+                state.address &= 0xffff_ffff;
 
                 j += address_bytes as usize + spi_cmd_vals.pad_bytes as usize;
-
                 const MAX_TRACE_BLOCKLENGTH: usize = 6;
                 if j > MAX_TRACE_BLOCKLENGTH {
                     state.additional_pad_bytes = j - MAX_TRACE_BLOCKLENGTH;
                     j = MAX_TRACE_BLOCKLENGTH;
                 }
 
-                if state.brief {
-                    if state.start_timestamp != 0 {
-                        state.start_timestamp = 0;
-                    }
+                let output = if state.brief {
+                    state.start_timestamp = 0;
                     if spi_cmd_vals.address_type != AddressType::None {
-                        println!(
-                            "0x{:02x} @ 0x{:08x} ({})",
-                            spi_command, state.address, spi_cmd_vals.name
-                        );
+                        format!(
+                            "0x{spi_command:02x} @ 0x{:08x} ({})\n",
+                            state.address, spi_cmd_vals.name
+                        )
                     } else {
-                        println!("0x{:02x} ({})", spi_command, spi_cmd_vals.name);
+                        format!("0x{spi_command:02x} ({})\n", spi_cmd_vals.name)
                     }
                 } else {
                     state.counter += 1;
-                    let rel_time = state.timestamp - state.start_timestamp;
-                    print!(
-                        "\nTime: {:06}.{:08} command # {:<6} : 0x{:02x} - {}",
+                    let rel_time = state.timestamp.saturating_sub(state.start_timestamp);
+                    format!(
+                        "\nTime: {:06}.{:08} command # {:<6} : 0x{spi_command:02x} - {}",
                         rel_time / 100000000,
                         rel_time % 100000000,
                         state.counter,
-                        spi_command,
                         spi_cmd_vals.name
-                    );
-                }
-
+                    )
+                };
+                events.push(TraceEvent::Output(output));
                 state.curpos = 0;
                 state.outbytes = 0;
             }
@@ -463,24 +471,26 @@ pub fn read_spi_trace(
                     state.outbytes += 1;
                 }
             } else {
+                let payload_start = i * 8 + 4;
                 let blocklen = ((data[2 + i * 8 + 1].wrapping_sub(state.curpos)) / 8) as usize;
+                let blocklen = blocklen.min(data.len() - payload_start);
                 let spi_cmd_vals = get_command_vals(data[i * 8 + 4]);
+                let mut output = String::new();
 
                 while j < blocklen {
                     if state.outbytes == 0 {
                         match spi_cmd_vals.address_type {
                             AddressType::Dynamic | AddressType::Addr3B | AddressType::Addr4B => {
-                                print!("\n{:08x} : ", addr_offset + state.address);
+                                output
+                                    .push_str(&format!("\n{:08x} : ", addr_offset + state.address));
                             }
                             AddressType::NoOff3B => {
-                                print!("\n{:08x} : ", state.address);
+                                output.push_str(&format!("\n{:08x} : ", state.address));
                             }
-                            AddressType::None => {
-                                print!("\n         : ");
-                            }
+                            AddressType::None => output.push_str("\n         : "),
                         }
                     }
-                    print!("{:02x} ", data[i * 8 + 4 + j]);
+                    output.push_str(&format!("{:02x} ", data[payload_start + j]));
                     state.outbytes += 1;
                     if state.outbytes == 16 {
                         state.outbytes = 0;
@@ -488,13 +498,62 @@ pub fn read_spi_trace(
                     }
                     j += 1;
                 }
+
+                if !output.is_empty() {
+                    events.push(TraceEvent::Output(output));
+                }
             }
 
             state.curpos = data[2 + i * 8 + 1].wrapping_add(0x10);
-            io::stdout().flush().ok();
         }
     }
 
+    Ok(events)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_spi_trace_events(
+    em100: &Em100,
+    state: &mut TraceState,
+    addr_offset: u64,
+) -> Result<Vec<TraceEvent>> {
+    let reports = read_report_buffer(em100)?;
+    decode_spi_trace_reports(&reports, state, addr_offset)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_spi_trace_output(
+    em100: &Em100,
+    state: &mut TraceState,
+    addr_offset: u64,
+) -> Result<String> {
+    Ok(read_spi_trace_events(em100, state, addr_offset)?
+        .into_iter()
+        .filter_map(|event| match event {
+            TraceEvent::Output(output) => Some(output),
+            TraceEvent::Timestamp => None,
+        })
+        .collect())
+}
+
+/// Read SPI trace data
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_spi_trace(
+    em100: &Em100,
+    state: &mut TraceState,
+    display_terminal: bool,
+    addr_offset: u64,
+) -> Result<bool> {
+    for event in read_spi_trace_events(em100, state, addr_offset)? {
+        match event {
+            TraceEvent::Output(output) => print!("{output}"),
+            TraceEvent::Timestamp if display_terminal => {
+                read_spi_terminal(em100, true)?;
+            }
+            TraceEvent::Timestamp => {}
+        }
+    }
+    io::stdout().flush().ok();
     Ok(true)
 }
 
@@ -511,13 +570,17 @@ pub enum HtMsgType {
     LookupTable = 0x07,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 const UFIFO_SIZE: usize = 512;
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
+#[cfg(not(target_arch = "wasm32"))]
 static MSG_COUNTER: AtomicU32 = AtomicU32::new(1);
 
 /// Read SPI terminal messages
+#[cfg(not(target_arch = "wasm32"))]
 pub fn read_spi_terminal(em100: &Em100, show_counter: bool) -> Result<bool> {
     let data = spi::read_ufifo(em100, UFIFO_SIZE, 0)?;
 
@@ -583,6 +646,7 @@ pub fn read_spi_terminal(em100: &Em100, show_counter: bool) -> Result<bool> {
 }
 
 /// Initialize SPI terminal
+#[cfg(not(target_arch = "wasm32"))]
 pub fn init_spi_terminal(em100: &Em100) -> Result<()> {
     spi::write_ht_register(em100, spi::HtRegister::UfifoDataFmt, 0)?;
     spi::write_ht_register(em100, spi::HtRegister::Status, spi::START_SPI_EMULATION)?;
@@ -599,6 +663,7 @@ pub fn init_spi_terminal(em100: &Em100) -> Result<()> {
 }
 
 /// Read SPI trace in console mode
+#[cfg(not(target_arch = "wasm32"))]
 pub fn read_spi_trace_console(
     em100: &Em100,
     state: &mut TraceState,
@@ -700,6 +765,72 @@ pub fn read_spi_trace_console(
     Ok(true)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn spi_cmd_vals_address_type(cmd: u8) -> AddressType {
     get_command_vals(cmd).address_type
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{REPORT_BUFFER_LENGTH, TraceEvent, TraceState, decode_spi_trace_reports};
+
+    fn report_with_record(record: [u8; 8]) -> Vec<u8> {
+        let mut report = vec![0; REPORT_BUFFER_LENGTH];
+        report[1] = 1;
+        report[2..10].copy_from_slice(&record);
+        report
+    }
+
+    #[test]
+    fn rejects_short_reports() {
+        let error = decode_spi_trace_reports(
+            &[vec![0; REPORT_BUFFER_LENGTH - 1]],
+            &mut TraceState::default(),
+            0,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Report length"));
+    }
+
+    #[test]
+    fn decodes_timestamp_and_brief_command() {
+        let timestamp = report_with_record([0xff, 0, 1, 2, 3, 4, 5, 6]);
+        let command = report_with_record([1, 0, 0x03, 0x12, 0x34, 0x56, 0, 0]);
+        let events =
+            decode_spi_trace_reports(&[timestamp, command], &mut TraceState::new(true, 3), 0)
+                .unwrap();
+
+        assert_eq!(events[0], TraceEvent::Timestamp);
+        assert_eq!(
+            events[1],
+            TraceEvent::Output("0x03 @ 0x00123456 (read)\n".to_string())
+        );
+    }
+
+    #[test]
+    fn enter_four_byte_mode_changes_dynamic_addresses() {
+        let enter = report_with_record([1, 0, 0xb7, 0, 0, 0, 0, 0]);
+        let read = report_with_record([2, 0, 0x03, 0x12, 0x34, 0x56, 0x78, 0]);
+        let events =
+            decode_spi_trace_reports(&[enter, read], &mut TraceState::new(true, 3), 0).unwrap();
+
+        assert_eq!(
+            events.last(),
+            Some(&TraceEvent::Output(
+                "0x03 @ 0x12345678 (read)\n".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn malformed_final_record_is_bounded_by_report_length() {
+        let mut report = vec![0; REPORT_BUFFER_LENGTH];
+        report[0..2].copy_from_slice(&1023u16.to_be_bytes());
+        let record = 2 + 1022 * 8;
+        report[record] = 1;
+        report[record + 1] = 0xf8;
+        report[record + 2] = 0x06;
+
+        decode_spi_trace_reports(&[report], &mut TraceState::default(), 0).unwrap();
+    }
 }
