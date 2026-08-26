@@ -434,11 +434,9 @@ impl Em100Async {
         self.write_fpga_register(Register::CHIP_CONFIG_81.address(), 0x00)
             .await?;
 
-        // Auto-enable 4-byte address mode for large chips (>16MB)
-        // This matches CLI behavior in main.rs
-        if chip.size > 16 * 1024 * 1024 {
-            self.set_address_mode(4).await?;
-        }
+        // Reset the address width on every chip change, including when moving
+        // from a large chip back to a 3-byte-addressed chip.
+        self.set_address_mode(chip.default_address_mode()).await?;
 
         Ok(())
     }

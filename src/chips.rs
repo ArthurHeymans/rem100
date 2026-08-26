@@ -37,6 +37,13 @@ impl Default for ChipDesc {
     }
 }
 
+impl ChipDesc {
+    /// Address width the emulator should use for this chip by default.
+    pub fn default_address_mode(&self) -> u8 {
+        if self.size > 16 * 1024 * 1024 { 4 } else { 3 }
+    }
+}
+
 // Dediprog configuration file constants
 const DEDIPROG_CFG_PRO_SIZE: usize = 176;
 const DEDIPROG_CFG_PRO_SIZE_SFDP: usize = 256;
@@ -341,4 +348,21 @@ pub fn get_em100_file(name: &str) -> Result<std::path::PathBuf> {
     }
 
     Ok(base.join(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChipDesc;
+
+    #[test]
+    fn default_address_mode_tracks_capacity_boundary() {
+        let mut chip = ChipDesc {
+            size: 16 * 1024 * 1024,
+            ..ChipDesc::default()
+        };
+        assert_eq!(chip.default_address_mode(), 3);
+
+        chip.size += 1;
+        assert_eq!(chip.default_address_mode(), 4);
+    }
 }

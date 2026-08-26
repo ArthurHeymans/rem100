@@ -127,6 +127,8 @@ impl Em100App {
                 self.hold_pin_state = em100.get_hold_pin_state().unwrap_or(HoldPinState::Float);
                 self.device_info = Some(info.clone());
                 self.device = Some(Arc::new(Mutex::new(em100)));
+                self.selected_chip = None;
+                self.address_mode = 3;
                 self.set_status(&format!("Connected to {}", info.serial), false);
             }
             Err(e) => {
@@ -144,6 +146,8 @@ impl Em100App {
         self.stop_trace();
         self.device = None;
         self.device_info = None;
+        self.selected_chip = None;
+        self.address_mode = 3;
         self.set_status("Disconnected", false);
     }
 
@@ -151,6 +155,13 @@ impl Em100App {
     fn set_emulation_state(&mut self, running: bool) {
         if self.trace_running.load(Ordering::Relaxed) {
             self.set_status("Stop trace capture before changing emulation state", true);
+            return;
+        }
+        if running && self.selected_chip.is_none() {
+            self.set_status(
+                "Select and configure a chip before starting emulation",
+                true,
+            );
             return;
         }
         let result = if let Some(ref device) = self.device {
@@ -218,13 +229,9 @@ impl Em100App {
             if let Ok(mut em100) = device.lock() {
                 // Stop emulation before changing chip type (matches CLI --stop --set pattern)
                 let _ = em100.set_state(false);
-                let res = em100.set_chip_type(&chip);
-                // Auto-enable 4-byte mode for large chips
-                if res.is_ok() && chip.size > 16 * 1024 * 1024 && em100.set_address_mode(4).is_ok()
-                {
-                    self.address_mode = 4;
-                }
-                res
+                em100
+                    .set_chip_type(&chip)
+                    .and_then(|_| em100.set_address_mode(chip.default_address_mode()))
             } else {
                 return;
             }
@@ -236,6 +243,7 @@ impl Em100App {
             Ok(_) => {
                 // Emulation was stopped before chip change
                 self.is_running = false;
+                self.address_mode = chip.default_address_mode();
                 self.set_status(&format!("Chip set to {} {}", chip.vendor, chip.name), false);
                 self.selected_chip = Some(chip);
             }
@@ -432,16 +440,113 @@ impl Em100App {
             ui.separator();
             ui.heading("Control");
 
+            ui.label(RichText::new("1. Select and configure the flash chip").strong());
+            let mut chip_to_set: Option<ChipDesc> = None;
+            ui.horizontal(|ui| {
+                ui.label("Chip:");
+                let selected_text = if let Some(ref chip) = self.selected_chip {
+                    format!("{} {} ({} bytes)", chip.vendor, chip.name, chip.size)
+                } else {
+                    "Select chip...".to_string()
+                };
+
+                egui::ComboBox::from_id_salt("chip_selector")
+                    .width(500.0)
+                    .selected_text(selected_text)
+                    .show_ui(ui, |ui| {
+                        ui.text_edit_singleline(&mut self.chip_search);
+                        ui.separator();
+                        let search_lower = self.chip_search.to_lowercase();
+                        egui::ScrollArea::vertical()
+                            .max_height(500.0)
+                            .show(ui, |ui| {
+                                for chip in &self.available_chips {
+                                    let chip_name = format!("{} {}", chip.vendor, chip.name);
+                                    if search_lower.is_empty()
+                                        || chip_name.to_lowercase().contains(&search_lower)
+                                    {
+                                        let is_selected = self
+                                            .selected_chip
+                                            .as_ref()
+                                            .map(|c| c.name == chip.name && c.vendor == chip.vendor)
+                                            .unwrap_or(false);
+                                        if ui.selectable_label(is_selected, &chip_name).clicked() {
+                                            chip_to_set = Some(chip.clone());
+                                        }
+                                    }
+                                }
+                            });
+                    });
+            });
+            if let Some(chip) = chip_to_set {
+                self.set_chip(chip);
+            }
+
+            if let Some((inferred_mode, size_mib)) = self
+                .selected_chip
+                .as_ref()
+                .map(|chip| (chip.default_address_mode(), chip.size / (1024 * 1024)))
+            {
+                ui.label(format!(
+                    "Addressing: {}-byte (selected automatically for this chip)",
+                    self.address_mode
+                ));
+                ui.collapsing("Advanced addressing override", |ui| {
+                    ui.label(format!(
+                        "The chip database does not describe addressing capabilities; {}-byte is inferred from the {} MiB capacity.",
+                        inferred_mode,
+                        size_mib
+                    ));
+                    let mut requested_mode = self.address_mode;
+                    ui.add_enabled_ui(!self.trace_running.load(Ordering::Relaxed), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut requested_mode, 3, "3-byte");
+                            ui.selectable_value(&mut requested_mode, 4, "4-byte");
+                        });
+                    });
+                    if requested_mode != self.address_mode {
+                        let result = self
+                            .device
+                            .as_ref()
+                            .and_then(|device| device.lock().ok())
+                            .map(|em100| em100.set_address_mode(requested_mode));
+                        match result {
+                            Some(Ok(())) => self.address_mode = requested_mode,
+                            Some(Err(error)) => {
+                                self.set_status(&format!("Failed to set address mode: {error}"), true)
+                            }
+                            None => self.set_status("Device is unavailable", true),
+                        }
+                    }
+                });
+            } else {
+                ui.label(
+                    RichText::new("Select a chip to enable emulation and trace capture.").italics(),
+                );
+            }
+
+            ui.add_space(12.0);
+            ui.label(RichText::new("2. Start emulation").strong());
+
             ui.horizontal(|ui| {
                 ui.label("Emulation:");
-                if ui
-                    .add_enabled(!self.is_running, egui::Button::new("Start"))
-                    .clicked()
-                {
+                let start = ui.add_enabled(
+                    !self.is_running
+                        && self.selected_chip.is_some()
+                        && !self.trace_running.load(Ordering::Relaxed),
+                    egui::Button::new("Start"),
+                );
+                if start.clicked() {
                     self.set_emulation_state(true);
                 }
+                if self.selected_chip.is_none() {
+                    start.on_disabled_hover_text("Select and configure a chip first");
+                }
                 if ui
-                    .add_enabled(self.is_running, egui::Button::new("Stop"))
+                    .add_enabled(
+                        self.is_running && !self.trace_running.load(Ordering::Relaxed),
+                        egui::Button::new("Stop"),
+                    )
                     .clicked()
                 {
                     self.set_emulation_state(false);
@@ -486,79 +591,6 @@ impl Em100App {
             });
             if let Some(state) = hold_pin_changed {
                 self.set_hold_pin(state);
-            }
-
-            ui.add_space(8.0);
-            let mut address_mode_changed = None;
-            ui.horizontal(|ui| {
-                ui.label("Address Mode:");
-                if ui
-                    .selectable_value(&mut self.address_mode, 3, "3-byte")
-                    .clicked()
-                {
-                    address_mode_changed = Some(3);
-                }
-                if ui
-                    .selectable_value(&mut self.address_mode, 4, "4-byte")
-                    .clicked()
-                {
-                    address_mode_changed = Some(4);
-                }
-            });
-            if let Some(mode) = address_mode_changed {
-                if let Some(ref device) = self.device {
-                    if let Ok(em100) = device.lock() {
-                        let _ = em100.set_address_mode(mode);
-                    }
-                }
-            }
-
-            ui.add_space(8.0);
-
-            // Chip selection
-            let mut chip_to_set: Option<ChipDesc> = None;
-            ui.horizontal(|ui| {
-                ui.label("Chip:");
-                let selected_text = if let Some(ref chip) = self.selected_chip {
-                    format!("{} {} ({} bytes)", chip.vendor, chip.name, chip.size)
-                } else {
-                    "None selected".to_string()
-                };
-
-                egui::ComboBox::from_id_salt("chip_selector")
-                    .width(500.0)
-                    .selected_text(selected_text)
-                    .show_ui(ui, |ui| {
-                        // Add search filter
-                        ui.text_edit_singleline(&mut self.chip_search);
-                        ui.separator();
-
-                        // Filter and display chips
-                        let search_lower = self.chip_search.to_lowercase();
-                        egui::ScrollArea::vertical()
-                            .max_height(500.0)
-                            .show(ui, |ui| {
-                                for chip in &self.available_chips {
-                                    let chip_name = format!("{} {}", chip.vendor, chip.name);
-                                    if search_lower.is_empty()
-                                        || chip_name.to_lowercase().contains(&search_lower)
-                                    {
-                                        let is_selected = self
-                                            .selected_chip
-                                            .as_ref()
-                                            .map(|c| c.name == chip.name && c.vendor == chip.vendor)
-                                            .unwrap_or(false);
-                                        if ui.selectable_label(is_selected, &chip_name).clicked() {
-                                            chip_to_set = Some(chip.clone());
-                                        }
-                                    }
-                                }
-                            });
-                    });
-            });
-
-            if let Some(chip) = chip_to_set {
-                self.set_chip(chip);
             }
         }
     }
@@ -716,6 +748,13 @@ impl Em100App {
     }
 
     fn start_trace(&mut self) {
+        if self.selected_chip.is_none() {
+            self.set_status(
+                "Select and configure a chip before starting trace capture",
+                true,
+            );
+            return;
+        }
         let Some(device) = self.device.clone() else {
             return;
         };
@@ -837,12 +876,17 @@ impl Em100App {
 
         let is_tracing = self.trace_running.load(Ordering::Relaxed);
         let worker_active = self.trace_worker_active.load(Ordering::Acquire);
+        let chip_selected = self.selected_chip.is_some();
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!worker_active, egui::Button::new("Start Trace"))
-                .clicked()
-            {
+            let start = ui.add_enabled(
+                !worker_active && chip_selected,
+                egui::Button::new("Start Trace"),
+            );
+            if start.clicked() {
                 self.start_trace();
+            }
+            if !chip_selected {
+                start.on_disabled_hover_text("Select and configure a chip first");
             }
             if ui
                 .add_enabled(is_tracing, egui::Button::new("Stop Trace"))
@@ -865,6 +909,13 @@ impl Em100App {
                 );
             });
         });
+
+        if !chip_selected {
+            ui.label(
+                RichText::new("Select a chip on the Device tab before capturing a trace.")
+                    .italics(),
+            );
+        }
 
         ui.add_space(8.0);
         egui::ScrollArea::vertical()

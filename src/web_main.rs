@@ -60,6 +60,8 @@ mod wasm_app {
         progress_message: String,
         download_data: Option<Vec<u8>>, // data downloaded from device
         pending_file: Option<(String, Vec<u8>)>, // (filename, data) from file picker
+        configured_chip: Option<Rc<ChipDesc>>,
+        address_mode: u8,
         trace_running: bool,
         trace_generation: u64,
         trace_output: String,
@@ -78,6 +80,8 @@ mod wasm_app {
                 progress_message: String::new(),
                 download_data: None,
                 pending_file: None,
+                configured_chip: None,
+                address_mode: 3,
                 trace_running: false,
                 trace_generation: 0,
                 trace_output: String::new(),
@@ -201,24 +205,29 @@ mod wasm_app {
         }
 
         fn disconnect(&mut self) {
-            if self.state.borrow().trace_running {
-                self.state.borrow_mut().async_op =
-                    AsyncOp::Error("Stop trace capture before disconnecting".to_string());
-                return;
-            }
             let mut s = self.state.borrow_mut();
             s.trace_running = false;
             s.trace_generation = s.trace_generation.wrapping_add(1);
             s.device = None;
             s.device_info = None;
+            s.configured_chip = None;
+            s.address_mode = 3;
             s.connection_state = ConnectionState::Disconnected;
             s.async_op = AsyncOp::Success("Disconnected".to_string());
+            self.selected_chip = None;
+            self.address_mode = 3;
         }
 
         fn set_emulation_state(&mut self, running: bool) {
             if self.state.borrow().trace_running {
                 self.state.borrow_mut().async_op = AsyncOp::Error(
                     "Stop trace capture before changing emulation state".to_string(),
+                );
+                return;
+            }
+            if running && self.state.borrow().configured_chip.is_none() {
+                self.state.borrow_mut().async_op = AsyncOp::Error(
+                    "Select and configure a chip before starting emulation".to_string(),
                 );
                 return;
             }
@@ -300,6 +309,7 @@ mod wasm_app {
                 s.device = device;
                 match result {
                     Some(Ok(_)) => {
+                        s.address_mode = mode;
                         s.async_op = AsyncOp::Success(format!("Address mode set to {}-byte", mode));
                     }
                     Some(Err(e)) => {
@@ -361,8 +371,14 @@ mod wasm_app {
                 return;
             }
             let chip_for_async = chip.clone();
-            state.borrow_mut().async_op =
-                AsyncOp::InProgress(format!("Setting chip to {} {}...", chip.vendor, chip.name));
+            {
+                let mut s = state.borrow_mut();
+                s.configured_chip = None;
+                s.async_op = AsyncOp::InProgress(format!(
+                    "Setting chip to {} {}...",
+                    chip.vendor, chip.name
+                ));
+            }
 
             spawn_local(async move {
                 // Take device out of state to avoid holding borrow across await
@@ -385,14 +401,11 @@ mod wasm_app {
                     Some(Ok(_)) => {
                         // set_chip_type stops emulation, so update is_running
                         s.is_running = false;
-                        let mode_msg = if chip_for_async.size > 16 * 1024 * 1024 {
-                            " (4-byte address mode enabled)"
-                        } else {
-                            ""
-                        };
+                        s.address_mode = chip_for_async.default_address_mode();
+                        s.configured_chip = Some(chip_for_async.clone());
                         s.async_op = AsyncOp::Success(format!(
-                            "Chip set to {} {}{}",
-                            chip_for_async.vendor, chip_for_async.name, mode_msg
+                            "Chip set to {} {} ({}-byte addressing)",
+                            chip_for_async.vendor, chip_for_async.name, s.address_mode
                         ));
                     }
                     Some(Err(e)) => {
@@ -403,8 +416,6 @@ mod wasm_app {
                     }
                 }
             });
-
-            self.selected_chip = Some(chip);
         }
 
         fn start_trace(&mut self, ctx: &egui::Context) {
@@ -419,6 +430,12 @@ mod wasm_app {
 
             let generation = {
                 let mut s = self.state.borrow_mut();
+                if s.configured_chip.is_none() {
+                    s.async_op = AsyncOp::Error(
+                        "Select and configure a chip before starting trace capture".to_string(),
+                    );
+                    return;
+                }
                 if s.trace_running {
                     return;
                 }
@@ -797,6 +814,9 @@ mod wasm_app {
 
             let is_running = state.is_running;
             let hold_pin_state = state.hold_pin_state;
+            let chip_configured = state.configured_chip.is_some();
+            let trace_running = state.trace_running;
+            let is_busy = matches!(state.async_op, AsyncOp::InProgress(_));
             drop(state);
 
             // Control panel
@@ -805,86 +825,7 @@ mod wasm_app {
                 ui.separator();
                 ui.heading("Control");
 
-                ui.horizontal(|ui| {
-                    ui.label("Emulation:");
-                    if ui
-                        .add_enabled(!is_running, egui::Button::new("Start"))
-                        .clicked()
-                    {
-                        self.set_emulation_state(true);
-                    }
-                    if ui
-                        .add_enabled(is_running, egui::Button::new("Stop"))
-                        .clicked()
-                    {
-                        self.set_emulation_state(false);
-                    }
-
-                    let status_text = if is_running {
-                        egui::RichText::new("Running").color(Color32::GREEN)
-                    } else {
-                        egui::RichText::new("Stopped").color(Color32::RED)
-                    };
-                    ui.label(status_text);
-                });
-
-                ui.add_space(8.0);
-
-                let mut hold_pin_to_set: Option<HoldPinState> = None;
-                ui.horizontal(|ui| {
-                    ui.label("Hold Pin:");
-                    egui::ComboBox::from_id_salt("hold_pin")
-                        .selected_text(format!("{}", hold_pin_state))
-                        .show_ui(ui, |ui| {
-                            if ui
-                                .selectable_label(hold_pin_state == HoldPinState::Float, "Float")
-                                .clicked()
-                            {
-                                hold_pin_to_set = Some(HoldPinState::Float);
-                            }
-                            if ui
-                                .selectable_label(hold_pin_state == HoldPinState::Low, "Low")
-                                .clicked()
-                            {
-                                hold_pin_to_set = Some(HoldPinState::Low);
-                            }
-                            if ui
-                                .selectable_label(hold_pin_state == HoldPinState::Input, "Input")
-                                .clicked()
-                            {
-                                hold_pin_to_set = Some(HoldPinState::Input);
-                            }
-                        });
-                });
-                if let Some(new_state) = hold_pin_to_set {
-                    self.set_hold_pin(new_state);
-                }
-
-                ui.add_space(8.0);
-                let mut address_mode_to_set: Option<u8> = None;
-                ui.horizontal(|ui| {
-                    ui.label("Address Mode:");
-                    if ui
-                        .selectable_value(&mut self.address_mode, 3, "3-byte")
-                        .clicked()
-                    {
-                        address_mode_to_set = Some(3);
-                    }
-                    if ui
-                        .selectable_value(&mut self.address_mode, 4, "4-byte")
-                        .clicked()
-                    {
-                        address_mode_to_set = Some(4);
-                    }
-                });
-                if let Some(mode) = address_mode_to_set {
-                    self.set_address_mode(mode);
-                }
-
-                ui.add_space(8.0);
-
-                // Chip selection
-                ui.label("Chip:");
+                ui.label(egui::RichText::new("1. Select and configure the flash chip").strong());
 
                 let mut chip_to_set: Option<Rc<ChipDesc>> = None;
                 let popup_id = ui.make_persistent_id("chip_selector_popup");
@@ -893,17 +834,15 @@ mod wasm_app {
                 } else {
                     "Select chip...".to_string()
                 };
-
-                // Custom combo-box-like button
-                let button = egui::Button::new(egui::RichText::new(format!("{} ▼", selected_text)))
-                    .min_size(egui::vec2(500.0, 0.0));
-                let response = ui.add(button);
-
+                let response = ui.add_enabled(
+                    !is_busy && !trace_running,
+                    egui::Button::new(egui::RichText::new(format!("{} ▼", selected_text)))
+                        .min_size(egui::vec2(500.0, 0.0)),
+                );
                 if response.clicked() {
                     ui.memory_mut(|mem| mem.toggle_popup(popup_id));
                 }
 
-                // Use popup with CloseOnClickOutside so clicking the search field doesn't close it
                 let search_field_id = ui.make_persistent_id("chip_search_field");
                 egui::popup::popup_below_widget(
                     ui,
@@ -912,8 +851,6 @@ mod wasm_app {
                     egui::popup::PopupCloseBehavior::CloseOnClickOutside,
                     |ui| {
                         ui.set_min_width(500.0);
-
-                        // Search filter - always request focus so it's ready for typing
                         let search_response = ui.add(
                             egui::TextEdit::singleline(&mut self.chip_search)
                                 .id(search_field_id)
@@ -921,8 +858,6 @@ mod wasm_app {
                         );
                         search_response.request_focus();
                         ui.separator();
-
-                        // Filter and display chips using pre-computed names
                         let search_lower = self.chip_search.to_lowercase();
                         egui::ScrollArea::vertical()
                             .max_height(500.0)
@@ -951,9 +886,114 @@ mod wasm_app {
                             });
                     },
                 );
-
                 if let Some(chip) = chip_to_set {
                     self.set_chip(chip);
+                }
+
+                if let Some((inferred_mode, size_mib)) = self
+                    .selected_chip
+                    .as_ref()
+                    .map(|chip| (chip.default_address_mode(), chip.size / (1024 * 1024)))
+                {
+                    ui.label(format!(
+                        "Addressing: {}-byte (selected automatically for this chip)",
+                        self.address_mode
+                    ));
+                    ui.collapsing("Advanced addressing override", |ui| {
+                        ui.label(format!(
+                            "The chip database does not describe addressing capabilities; {}-byte is inferred from the {} MiB capacity.",
+                            inferred_mode,
+                            size_mib
+                        ));
+                        let mut requested_mode = self.address_mode;
+                        ui.add_enabled_ui(!is_busy && !trace_running, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(&mut requested_mode, 3, "3-byte");
+                                ui.selectable_value(&mut requested_mode, 4, "4-byte");
+                            });
+                        });
+                        if requested_mode != self.address_mode {
+                            self.set_address_mode(requested_mode);
+                        }
+                    });
+                } else {
+                    ui.label(
+                        egui::RichText::new("Select a chip to enable emulation and trace capture.")
+                            .italics(),
+                    );
+                }
+
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new("2. Start emulation").strong());
+
+                ui.horizontal(|ui| {
+                    ui.label("Emulation:");
+                    let start = ui.add_enabled(
+                        !is_running && chip_configured && !is_busy && !trace_running,
+                        egui::Button::new("Start"),
+                    );
+                    if start.clicked() {
+                        self.set_emulation_state(true);
+                    }
+                    if !chip_configured {
+                        start.on_disabled_hover_text("Select and configure a chip first");
+                    }
+                    if ui
+                        .add_enabled(
+                            is_running && !is_busy && !trace_running,
+                            egui::Button::new("Stop"),
+                        )
+                        .clicked()
+                    {
+                        self.set_emulation_state(false);
+                    }
+
+                    let status_text = if is_running {
+                        egui::RichText::new("Running").color(Color32::GREEN)
+                    } else {
+                        egui::RichText::new("Stopped").color(Color32::RED)
+                    };
+                    ui.label(status_text);
+                });
+
+                ui.add_space(8.0);
+
+                let mut hold_pin_to_set: Option<HoldPinState> = None;
+                ui.add_enabled_ui(!is_busy && !trace_running, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Hold Pin:");
+                        egui::ComboBox::from_id_salt("hold_pin")
+                            .selected_text(format!("{}", hold_pin_state))
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(
+                                        hold_pin_state == HoldPinState::Float,
+                                        "Float",
+                                    )
+                                    .clicked()
+                                {
+                                    hold_pin_to_set = Some(HoldPinState::Float);
+                                }
+                                if ui
+                                    .selectable_label(hold_pin_state == HoldPinState::Low, "Low")
+                                    .clicked()
+                                {
+                                    hold_pin_to_set = Some(HoldPinState::Low);
+                                }
+                                if ui
+                                    .selectable_label(
+                                        hold_pin_state == HoldPinState::Input,
+                                        "Input",
+                                    )
+                                    .clicked()
+                                {
+                                    hold_pin_to_set = Some(HoldPinState::Input);
+                                }
+                            });
+                    });
+                });
+                if let Some(new_state) = hold_pin_to_set {
+                    self.set_hold_pin(new_state);
                 }
 
                 // Memory operations section
@@ -1051,6 +1091,7 @@ mod wasm_app {
 
             let state = self.state.borrow();
             let is_connected = matches!(state.connection_state, ConnectionState::Connected);
+            let chip_configured = state.configured_chip.is_some();
             let trace_running = state.trace_running;
             let is_busy = matches!(state.async_op, AsyncOp::InProgress(_));
             drop(state);
@@ -1061,11 +1102,15 @@ mod wasm_app {
             }
 
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(!trace_running && !is_busy, egui::Button::new("Start Trace"))
-                    .clicked()
-                {
+                let start = ui.add_enabled(
+                    !trace_running && chip_configured && !is_busy,
+                    egui::Button::new("Start Trace"),
+                );
+                if start.clicked() {
                     self.start_trace(ctx);
+                }
+                if !chip_configured {
+                    start.on_disabled_hover_text("Select and configure a chip first");
                 }
                 if ui
                     .add_enabled(trace_running, egui::Button::new("Stop Trace"))
@@ -1088,6 +1133,15 @@ mod wasm_app {
                     );
                 });
             });
+
+            if !chip_configured {
+                ui.label(
+                    egui::RichText::new(
+                        "Select a chip on the Device tab before capturing a trace.",
+                    )
+                    .italics(),
+                );
+            }
 
             ui.add_space(8.0);
             egui::ScrollArea::vertical()
@@ -1123,6 +1177,12 @@ mod wasm_app {
 
     impl eframe::App for Em100WebApp {
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+            {
+                let state = self.state.borrow();
+                self.selected_chip = state.configured_chip.clone();
+                self.address_mode = state.address_mode;
+            }
+
             // Check for pending file from file picker
             if let Ok(mut state) = self.state.try_borrow_mut() {
                 if let Some((filename, data)) = state.pending_file.take() {
