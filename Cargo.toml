@@ -29,6 +29,7 @@ anyhow = "1"
 
 # Byte order conversion
 byteorder = "1"
+zerocopy = { version = "0.8", features = ["derive"] }
 
 # CLI-only dependencies
 clap = { version = "4", features = ["derive"], optional = true }

@@ -3,6 +3,7 @@
 use crate::device::Em100;
 use crate::error::{Error, Result};
 use crate::fpga;
+use crate::protocol::{fpga::Register, trace as command};
 use crate::spi;
 use crate::usb;
 use std::io::{self, Write};
@@ -317,19 +318,13 @@ impl TraceState {
 
 /// Reset SPI trace buffer
 pub fn reset_spi_trace(em100: &Em100) -> Result<()> {
-    let cmd = [0xbdu8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::reset())?;
     Ok(())
 }
 
 /// Read report buffer from device
 fn read_report_buffer(em100: &Em100) -> Result<[[u8; REPORT_BUFFER_LENGTH]; REPORT_BUFFER_COUNT]> {
-    let mut cmd = [0u8; 16];
-    cmd[0] = 0xbc; // read SPI trace buffer
-    cmd[4] = REPORT_BUFFER_COUNT as u8;
-    cmd[9] = 0x15; // TraceConfig
-
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::read(REPORT_BUFFER_COUNT as u8, 0x15))?;
 
     let mut reportdata = [[0u8; REPORT_BUFFER_LENGTH]; REPORT_BUFFER_COUNT];
 
@@ -593,8 +588,12 @@ pub fn init_spi_terminal(em100: &Em100) -> Result<()> {
     spi::write_ht_register(em100, spi::HtRegister::Status, spi::START_SPI_EMULATION)?;
 
     // Set EM100 to recognize SPI command 0x11
-    fpga::write_fpga_register(em100, 0x82, EM100_SPECIFIC_CMD as u16)?;
-    let _ = fpga::read_fpga_register(em100, 0x28)?;
+    fpga::write_fpga_register(
+        em100,
+        Register::SPI_COMMAND.address(),
+        EM100_SPECIFIC_CMD as u16,
+    )?;
+    let _ = fpga::read_fpga_register(em100, Register::EMULATION_STATE.address())?;
 
     Ok(())
 }

@@ -2,6 +2,7 @@
 
 use crate::device::Em100;
 use crate::error::{Error, Result};
+use crate::protocol::system as command;
 use crate::usb;
 
 /// Channels for setting voltage
@@ -45,8 +46,7 @@ pub enum LedState {
 ///
 /// Returns (MCU version, FPGA version)
 pub fn get_version(em100: &Em100) -> Result<(u16, u16)> {
-    let cmd = [0x10u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::get_version())?;
 
     let data = usb::get_response(em100, 512)?;
 
@@ -67,49 +67,13 @@ pub fn set_voltage(em100: &Em100, channel: SetVoltageChannel, mv: u16) -> Result
         ));
     }
 
-    let cmd = [
-        0x11,
-        channel as u8,
-        (mv >> 8) as u8,
-        (mv & 0xff) as u8,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::set_voltage(channel as u8, mv))?;
     Ok(())
 }
 
 /// Get voltage from a channel (returns millivolts)
 pub fn get_voltage(em100: &Em100, channel: GetVoltageChannel) -> Result<u32> {
-    let cmd = [
-        0x12,
-        channel as u8,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::get_voltage(channel as u8))?;
 
     let data = usb::get_response(em100, 512)?;
 
@@ -138,7 +102,6 @@ pub fn get_voltage(em100: &Em100, channel: GetVoltageChannel) -> Result<u32> {
 
 /// Set LED state
 pub fn set_led(em100: &Em100, state: LedState) -> Result<()> {
-    let cmd = [0x13, state as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::set_led(state as u8))?;
     Ok(())
 }

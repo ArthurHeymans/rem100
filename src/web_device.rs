@@ -5,6 +5,10 @@
 
 use crate::chips::ChipDesc;
 use crate::error::{Error, Result};
+use crate::protocol::{
+    chip as chip_command, fpga as fpga_command, fpga::Register, sdram as sdram_command,
+    spi as spi_command, system as system_command,
+};
 use crate::web_usb;
 use nusb::transfer::{Bulk, In, Out};
 use nusb::{Endpoint, Interface};
@@ -191,8 +195,7 @@ impl Em100Async {
 
     /// Get firmware version information
     async fn get_version(&mut self) -> Result<()> {
-        let cmd = [0x10u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        web_usb::send_cmd(&mut self.endpoint_out, &cmd).await?;
+        web_usb::send_command(&mut self.endpoint_out, system_command::get_version()).await?;
 
         let data = web_usb::get_response(&mut self.endpoint_in, 512).await?;
 
@@ -219,8 +222,7 @@ impl Em100Async {
 
     /// Get SPI flash ID
     async fn get_spi_flash_id(&mut self) -> Result<u32> {
-        let cmd = [0x30u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        web_usb::send_cmd(&mut self.endpoint_out, &cmd).await?;
+        web_usb::send_command(&mut self.endpoint_out, spi_command::get_id()).await?;
 
         let data = web_usb::get_response(&mut self.endpoint_in, 512).await?;
 
@@ -234,25 +236,7 @@ impl Em100Async {
 
     /// Read a 256-byte page from SPI flash
     async fn read_spi_flash_page(&mut self, address: u32) -> Result<Vec<u8>> {
-        let cmd = [
-            0x33u8,
-            ((address >> 16) & 0xff) as u8,
-            ((address >> 8) & 0xff) as u8,
-            (address & 0xff) as u8,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ];
-        web_usb::send_cmd(&mut self.endpoint_out, &cmd).await?;
+        web_usb::send_command(&mut self.endpoint_out, spi_command::read_page(address)).await?;
 
         let data = web_usb::get_response(&mut self.endpoint_in, 256).await?;
 
@@ -265,8 +249,11 @@ impl Em100Async {
 
     /// Read FPGA register
     pub async fn read_fpga_register(&mut self, reg: u8) -> Result<u16> {
-        let cmd = [0x22u8, reg, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        web_usb::send_cmd(&mut self.endpoint_out, &cmd).await?;
+        web_usb::send_command(
+            &mut self.endpoint_out,
+            fpga_command::read_register(Register::from_raw(reg)),
+        )
+        .await?;
 
         let data = web_usb::get_response(&mut self.endpoint_in, 3).await?;
 
@@ -280,31 +267,17 @@ impl Em100Async {
 
     /// Write FPGA register
     pub async fn write_fpga_register(&mut self, reg: u8, val: u16) -> Result<()> {
-        let cmd = [
-            0x23u8,
-            reg,
-            (val >> 8) as u8,
-            (val & 0xff) as u8,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ];
-        web_usb::send_cmd(&mut self.endpoint_out, &cmd).await?;
+        web_usb::send_command(
+            &mut self.endpoint_out,
+            fpga_command::write_register(Register::from_raw(reg), val),
+        )
+        .await?;
         Ok(())
     }
 
     /// Start or stop emulation
     pub async fn set_state(&mut self, run: bool) -> Result<()> {
-        self.write_fpga_register(0x28, if run { 1 } else { 0 })
+        self.write_fpga_register(Register::EMULATION_STATE.address(), if run { 1 } else { 0 })
             .await?;
 
         // Verify the state was actually set (read back and check)
@@ -322,7 +295,9 @@ impl Em100Async {
 
     /// Get current emulation state
     pub async fn get_state(&mut self) -> Result<bool> {
-        let state = self.read_fpga_register(0x28).await?;
+        let state = self
+            .read_fpga_register(Register::EMULATION_STATE.address())
+            .await?;
         Ok(state != 0)
     }
 
@@ -334,14 +309,19 @@ impl Em100Async {
                 mode
             )));
         }
-        self.write_fpga_register(0x4f, if mode == 4 { 1 } else { 0 })
-            .await?;
+        self.write_fpga_register(
+            Register::ADDRESS_MODE.address(),
+            if mode == 4 { 1 } else { 0 },
+        )
+        .await?;
         Ok(())
     }
 
     /// Get current hold pin state
     pub async fn get_hold_pin_state(&mut self) -> Result<HoldPinState> {
-        let val = self.read_fpga_register(0x2a).await?;
+        let val = self
+            .read_fpga_register(Register::HOLD_PIN.address())
+            .await?;
         match val {
             0 => Ok(HoldPinState::Low),
             2 => Ok(HoldPinState::Float),
@@ -353,17 +333,25 @@ impl Em100Async {
     /// Set hold pin state
     pub async fn set_hold_pin_state(&mut self, state: HoldPinState) -> Result<()> {
         // Read and acknowledge current state
-        let val = self.read_fpga_register(0x2a).await?;
-        self.write_fpga_register(0x2a, (1 << 2) | val).await?;
+        let val = self
+            .read_fpga_register(Register::HOLD_PIN.address())
+            .await?;
+        self.write_fpga_register(Register::HOLD_PIN.address(), (1 << 2) | val)
+            .await?;
 
         // Read again
-        let _ = self.read_fpga_register(0x2a).await?;
+        let _ = self
+            .read_fpga_register(Register::HOLD_PIN.address())
+            .await?;
 
         // Set desired state
-        self.write_fpga_register(0x2a, state as u16).await?;
+        self.write_fpga_register(Register::HOLD_PIN.address(), state as u16)
+            .await?;
 
         // Verify
-        let new_val = self.read_fpga_register(0x2a).await?;
+        let new_val = self
+            .read_fpga_register(Register::HOLD_PIN.address())
+            .await?;
         if new_val != state as u16 {
             return Err(Error::OperationFailed(format!(
                 "Failed to set hold pin state. Expected {:?}, got {}",
@@ -378,7 +366,8 @@ impl Em100Async {
     pub async fn set_chip_type(&mut self, chip: &ChipDesc) -> Result<()> {
         // Stop emulation before changing chip type (matches CLI behavior)
         // Use write_fpga_register directly to avoid verification during chip setup
-        self.write_fpga_register(0x28, 0).await?;
+        self.write_fpga_register(Register::EMULATION_STATE.address(), 0)
+            .await?;
 
         let fpga_voltage = if self.fpga & 0x8000 != 0 { 1800 } else { 3300 };
 
@@ -412,13 +401,16 @@ impl Em100Async {
 
         // Send init sequence
         for entry in chip.init.iter().take(chip.init_len) {
-            web_usb::send_cmd(&mut self.endpoint_out, entry).await?;
+            web_usb::send_command(&mut self.endpoint_out, chip_command::initialize(entry)).await?;
         }
 
         // Set FPGA registers
-        self.write_fpga_register(0xc4, 0x01).await?;
-        self.write_fpga_register(0x10, 0x00).await?;
-        self.write_fpga_register(0x81, 0x00).await?;
+        self.write_fpga_register(Register::CHIP_CONFIG_C4.address(), 0x01)
+            .await?;
+        self.write_fpga_register(Register::CHIP_CONFIG_10.address(), 0x00)
+            .await?;
+        self.write_fpga_register(Register::CHIP_CONFIG_81.address(), 0x00)
+            .await?;
 
         // Auto-enable 4-byte address mode for large chips (>16MB)
         // This matches CLI behavior in main.rs
@@ -432,16 +424,12 @@ impl Em100Async {
     /// Set FPGA voltage (18 for 1.8V, 33 for 3.3V)
     async fn set_fpga_voltage(&mut self, voltage_code: u8) -> Result<bool> {
         // Reconfigure FPGA
-        let cmd = [0x20u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        web_usb::send_cmd(&mut self.endpoint_out, &cmd).await?;
-
-        let mut cmd = [0u8; 16];
-        cmd[0] = 0x24;
-        if voltage_code == 18 {
-            cmd[2] = 7;
-            cmd[3] = 0x80;
-        }
-        web_usb::send_cmd(&mut self.endpoint_out, &cmd).await?;
+        web_usb::send_command(&mut self.endpoint_out, fpga_command::reconfigure()).await?;
+        web_usb::send_command(
+            &mut self.endpoint_out,
+            fpga_command::set_voltage(voltage_code),
+        )
+        .await?;
 
         // Must wait 2s before issuing any other USB command
         // In wasm, we use a JS timeout
@@ -486,25 +474,11 @@ impl Em100Async {
         let length = data.len();
 
         // Send single write command for the entire transfer
-        let cmd = [
-            0x40u8,
-            (address >> 24) as u8,
-            (address >> 16) as u8,
-            (address >> 8) as u8,
-            address as u8,
-            (length >> 24) as u8,
-            (length >> 16) as u8,
-            (length >> 8) as u8,
-            length as u8,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ];
-        web_usb::send_cmd(&mut self.endpoint_out, &cmd).await?;
+        web_usb::send_command(
+            &mut self.endpoint_out,
+            sdram_command::write(address, length as u32),
+        )
+        .await?;
 
         // Stream data in 2MB chunks
         let mut bytes_sent = 0;
@@ -537,25 +511,11 @@ impl Em100Async {
         const TRANSFER_LENGTH: usize = 0x200000; // 2MB chunks, matches CLI
 
         // Send single read command for the entire transfer
-        let cmd = [
-            0x41u8,
-            (address >> 24) as u8,
-            (address >> 16) as u8,
-            (address >> 8) as u8,
-            address as u8,
-            (length >> 24) as u8,
-            (length >> 16) as u8,
-            (length >> 8) as u8,
-            length as u8,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ];
-        web_usb::send_cmd(&mut self.endpoint_out, &cmd).await?;
+        web_usb::send_command(
+            &mut self.endpoint_out,
+            sdram_command::read(address, length as u32),
+        )
+        .await?;
 
         // Read data in 2MB chunks
         let mut result = Vec::with_capacity(length);
