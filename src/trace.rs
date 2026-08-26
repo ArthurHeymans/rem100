@@ -315,6 +315,21 @@ pub enum TraceEvent {
     Timestamp,
 }
 
+/// Maximum trailing bytes of decoded trace output the GUIs render at once.
+pub const TRACE_DISPLAY_TAIL: usize = 64 * 1024;
+
+/// Borrow the trailing [`TRACE_DISPLAY_TAIL`] bytes of `output`.
+///
+/// The start is snapped forward to a UTF-8 boundary so the result can be
+/// rendered directly without slicing into a multi-byte character.
+pub fn trace_display_tail(output: &str) -> &str {
+    let mut start = output.len().saturating_sub(TRACE_DISPLAY_TAIL);
+    while !output.is_char_boundary(start) {
+        start += 1;
+    }
+    &output[start..]
+}
+
 impl Default for TraceState {
     fn default() -> Self {
         Self {
@@ -752,10 +767,12 @@ pub fn read_spi_trace_console(
                 continue;
             }
 
+            let payload_start = i * 8 + 4;
             let blocklen = ((data[2 + i * 8 + 1].wrapping_sub(state.curpos)) / 8) as usize;
+            let blocklen = blocklen.min(data.len() - payload_start);
 
             while j < blocklen {
-                print!("{}", data[i * 8 + 4 + j] as char);
+                print!("{}", data[payload_start + j] as char);
                 j += 1;
             }
 
@@ -774,7 +791,9 @@ fn spi_cmd_vals_address_type(cmd: u8) -> AddressType {
 
 #[cfg(test)]
 mod tests {
-    use super::{REPORT_BUFFER_LENGTH, TraceEvent, TraceState, decode_spi_trace_reports};
+    use super::{
+        REPORT_BUFFER_LENGTH, TraceEvent, TraceState, decode_spi_trace_reports, trace_display_tail,
+    };
 
     fn report_with_record(record: [u8; 8]) -> Vec<u8> {
         let mut report = vec![0; REPORT_BUFFER_LENGTH];
@@ -822,6 +841,16 @@ mod tests {
                 "0x03 @ 0x12345678 (read)\n".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn display_tail_snaps_to_char_boundary() {
+        assert_eq!(trace_display_tail("short"), "short");
+
+        let long = "é".repeat(super::TRACE_DISPLAY_TAIL);
+        let tail = trace_display_tail(&long);
+        assert_eq!(tail.len(), super::TRACE_DISPLAY_TAIL);
+        assert!(tail.starts_with('é'));
     }
 
     #[test]

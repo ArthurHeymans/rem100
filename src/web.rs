@@ -8,7 +8,7 @@ use crate::sdram::{read_sdram_with_progress, write_sdram_with_progress};
 use crate::trace::{self, TraceState};
 use egui::{Color32, RichText};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, TrySendError};
 use std::sync::{Arc, Mutex};
 
 /// Application state
@@ -153,8 +153,11 @@ impl Em100App {
 
     /// Set emulation state
     fn set_emulation_state(&mut self, running: bool) {
-        if self.trace_running.load(Ordering::Relaxed) {
-            self.set_status("Stop trace capture before changing emulation state", true);
+        if self.trace_worker_active.load(Ordering::Acquire) {
+            self.set_status(
+                "Wait for trace capture cleanup before changing emulation state",
+                true,
+            );
             return;
         }
         if running && self.selected_chip.is_none() {
@@ -194,8 +197,11 @@ impl Em100App {
 
     /// Set hold pin state
     fn set_hold_pin(&mut self, state: HoldPinState) {
-        if self.trace_running.load(Ordering::Relaxed) {
-            self.set_status("Stop trace capture before changing the hold pin", true);
+        if self.trace_worker_active.load(Ordering::Acquire) {
+            self.set_status(
+                "Wait for trace capture cleanup before changing the hold pin",
+                true,
+            );
             return;
         }
         let result = if let Some(ref device) = self.device {
@@ -221,8 +227,8 @@ impl Em100App {
 
     /// Set chip type
     fn set_chip(&mut self, chip: ChipDesc) {
-        if self.trace_running.load(Ordering::Relaxed) {
-            self.set_status("Stop trace capture before changing chips", true);
+        if self.trace_worker_active.load(Ordering::Acquire) {
+            self.set_status("Wait for trace capture cleanup before changing chips", true);
             return;
         }
         let result = if let Some(ref device) = self.device {
@@ -255,6 +261,11 @@ impl Em100App {
 
     /// Upload data to device (write file to SDRAM)
     fn upload_to_device(&mut self) {
+        if self.trace_worker_active.load(Ordering::Acquire) {
+            self.set_status("Wait for trace capture cleanup before uploading", true);
+            return;
+        }
+
         let data = match &self.upload_file_data {
             Some(d) => d.clone(),
             None => return,
@@ -292,6 +303,11 @@ impl Em100App {
 
     /// Download data from device (read SDRAM to file)
     fn download_from_device(&mut self) {
+        if self.trace_worker_active.load(Ordering::Acquire) {
+            self.set_status("Wait for trace capture cleanup before downloading", true);
+            return;
+        }
+
         let size = self
             .selected_chip
             .as_ref()
@@ -498,7 +514,7 @@ impl Em100App {
                         size_mib
                     ));
                     let mut requested_mode = self.address_mode;
-                    ui.add_enabled_ui(!self.trace_running.load(Ordering::Relaxed), |ui| {
+                    ui.add_enabled_ui(!trace_worker_active, |ui| {
                         ui.horizontal(|ui| {
                             ui.selectable_value(&mut requested_mode, 3, "3-byte");
                             ui.selectable_value(&mut requested_mode, 4, "4-byte");
@@ -531,9 +547,7 @@ impl Em100App {
             ui.horizontal(|ui| {
                 ui.label("Emulation:");
                 let start = ui.add_enabled(
-                    !self.is_running
-                        && self.selected_chip.is_some()
-                        && !self.trace_running.load(Ordering::Relaxed),
+                    !self.is_running && self.selected_chip.is_some() && !trace_worker_active,
                     egui::Button::new("Start"),
                 );
                 if start.clicked() {
@@ -544,7 +558,7 @@ impl Em100App {
                 }
                 if ui
                     .add_enabled(
-                        self.is_running && !self.trace_running.load(Ordering::Relaxed),
+                        self.is_running && !trace_worker_active,
                         egui::Button::new("Stop"),
                     )
                     .clicked()
@@ -604,8 +618,8 @@ impl Em100App {
             ui.label("Connect to a device first.");
             return;
         }
-        if self.trace_running.load(Ordering::Relaxed) {
-            ui.label("Stop trace capture before performing memory operations.");
+        if self.trace_worker_active.load(Ordering::Acquire) {
+            ui.label("Wait for trace capture cleanup before performing memory operations.");
             return;
         }
 
@@ -771,7 +785,8 @@ impl Em100App {
         let worker_running = running.clone();
         let worker_active = Arc::new(AtomicBool::new(true));
         let active_flag = worker_active.clone();
-        let (sender, receiver) = mpsc::channel();
+        const TRACE_QUEUE_CAPACITY: usize = 16;
+        let (sender, receiver) = mpsc::sync_channel(TRACE_QUEUE_CAPACITY);
         let brief = self.trace_brief;
         let address_mode = self.address_mode;
 
@@ -798,11 +813,10 @@ impl Em100App {
                     });
                 match result {
                     Ok(output) if output.is_empty() => {}
-                    Ok(output) => {
-                        if sender.send(Ok(output)).is_err() {
-                            break;
-                        }
-                    }
+                    Ok(output) => match sender.try_send(Ok(output)) {
+                        Ok(()) | Err(TrySendError::Full(_)) => {}
+                        Err(TrySendError::Disconnected(_)) => break,
+                    },
                     Err(error) => {
                         let _ = sender.send(Err(error));
                         break;
@@ -921,8 +935,9 @@ impl Em100App {
         egui::ScrollArea::vertical()
             .stick_to_bottom(true)
             .show(ui, |ui| {
+                let mut output = trace::trace_display_tail(&self.trace_buffer);
                 ui.add(
-                    egui::TextEdit::multiline(&mut self.trace_buffer)
+                    egui::TextEdit::multiline(&mut output)
                         .font(egui::TextStyle::Monospace)
                         .desired_width(f32::INFINITY)
                         .interactive(false),

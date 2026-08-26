@@ -333,10 +333,10 @@ impl Em100Async {
 
         let mut reports = Vec::with_capacity(REPORT_BUFFER_COUNT);
         for _ in 0..REPORT_BUFFER_COUNT {
-            let report = web_usb::get_response(&mut self.endpoint_in, REPORT_BUFFER_LENGTH).await?;
-            reports.push(validate_spi_trace_report(report)?);
+            reports.push(web_usb::get_response(&mut self.endpoint_in, REPORT_BUFFER_LENGTH).await?);
         }
-        Ok(reports)
+
+        reports.into_iter().map(validate_spi_trace_report).collect()
     }
 
     /// Get current hold pin state
