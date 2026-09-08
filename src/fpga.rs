@@ -2,6 +2,7 @@
 
 use crate::device::Em100;
 use crate::error::{Error, Result};
+use crate::protocol::{fpga as command, fpga::Register};
 use crate::usb;
 use std::thread;
 use std::time::Duration;
@@ -13,8 +14,7 @@ pub const FPGA_REG_VENDID: u8 = 0x42;
 
 /// Reconfigure FPGA
 pub fn reconfig_fpga(em100: &Em100) -> Result<()> {
-    let cmd = [0x20u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::reconfigure())?;
 
     // Specification says to wait 2s before issuing another USB command
     thread::sleep(Duration::from_secs(2));
@@ -23,8 +23,7 @@ pub fn reconfig_fpga(em100: &Em100) -> Result<()> {
 
 /// Check FPGA configuration status
 pub fn check_fpga_status(em100: &Em100) -> Result<bool> {
-    let cmd = [0x21u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::status())?;
 
     let data = usb::get_response(em100, 512)?;
 
@@ -37,8 +36,7 @@ pub fn check_fpga_status(em100: &Em100) -> Result<bool> {
 
 /// Read FPGA register
 pub fn read_fpga_register(em100: &Em100, reg: u8) -> Result<u16> {
-    let cmd = [0x22u8, reg, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::read_register(Register::from_raw(reg)))?;
 
     let data = usb::get_response(em100, 3)?;
 
@@ -52,37 +50,13 @@ pub fn read_fpga_register(em100: &Em100, reg: u8) -> Result<u16> {
 
 /// Write FPGA register
 pub fn write_fpga_register(em100: &Em100, reg: u8, val: u16) -> Result<()> {
-    let cmd = [
-        0x23u8,
-        reg,
-        (val >> 8) as u8,
-        (val & 0xff) as u8,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::write_register(Register::from_raw(reg), val))?;
     Ok(())
 }
 
 /// Set FPGA voltage (18 for 1.8V, 33 for 3.3V)
 pub fn fpga_set_voltage(em100: &Em100, voltage_code: u8) -> Result<()> {
-    let mut cmd = [0u8; 16];
-    cmd[0] = 0x24;
-    if voltage_code == 18 {
-        cmd[2] = 7;
-        cmd[3] = 0x80;
-    }
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::set_voltage(voltage_code))?;
     Ok(())
 }
 
@@ -98,7 +72,6 @@ pub fn fpga_get_voltage(em100: &Em100) -> Result<u8> {
 /// handles the required 2-second wait after the voltage switch command.
 /// For standalone FPGA reconfiguration with proper timing, use `reconfig_fpga`.
 pub fn fpga_reconfigure(em100: &Em100) -> Result<()> {
-    let cmd = [0x20u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::reconfigure())?;
     Ok(())
 }

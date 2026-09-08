@@ -2,6 +2,7 @@
 
 use crate::device::Em100;
 use crate::error::{Error, Result};
+use crate::protocol::sdram as command;
 use crate::usb;
 use nusb::transfer::Buffer;
 use std::time::Duration;
@@ -28,26 +29,7 @@ pub fn read_sdram_with_progress(
     length: usize,
     mut progress: ProgressCallback,
 ) -> Result<Vec<u8>> {
-    let cmd = [
-        0x41u8,
-        ((address >> 24) & 0xff) as u8,
-        ((address >> 16) & 0xff) as u8,
-        ((address >> 8) & 0xff) as u8,
-        (address & 0xff) as u8,
-        ((length >> 24) & 0xff) as u8,
-        ((length >> 16) & 0xff) as u8,
-        ((length >> 8) & 0xff) as u8,
-        (length & 0xff) as u8,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ];
-
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::read(address, length as u32))?;
 
     let mut data = vec![0u8; length];
     let mut bytes_read = 0;
@@ -131,26 +113,7 @@ pub fn write_sdram_with_progress(
 ) -> Result<()> {
     let length = data.len();
 
-    let cmd = [
-        0x40u8,
-        ((address >> 24) & 0xff) as u8,
-        ((address >> 16) & 0xff) as u8,
-        ((address >> 8) & 0xff) as u8,
-        (address & 0xff) as u8,
-        ((length >> 24) & 0xff) as u8,
-        ((length >> 16) & 0xff) as u8,
-        ((length >> 8) & 0xff) as u8,
-        (length & 0xff) as u8,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ];
-
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::write(address, length as u32))?;
 
     let mut bytes_sent = 0;
 

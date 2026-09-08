@@ -2,6 +2,7 @@
 
 use crate::device::Em100;
 use crate::error::{Error, Result};
+use crate::protocol::spi as command;
 use crate::usb;
 use nusb::transfer::Buffer;
 use std::thread;
@@ -12,8 +13,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// Get SPI flash ID
 pub fn get_spi_flash_id(em100: &Em100) -> Result<u32> {
-    let cmd = [0x30u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::get_id())?;
 
     let data = usb::get_response(em100, 512)?;
 
@@ -27,8 +27,7 @@ pub fn get_spi_flash_id(em100: &Em100) -> Result<u32> {
 
 /// Erase entire SPI flash
 pub fn erase_spi_flash(em100: &Em100) -> Result<()> {
-    let cmd = [0x31u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::erase())?;
 
     // Specification says to wait 5s before issuing another USB command
     thread::sleep(Duration::from_secs(5));
@@ -37,8 +36,7 @@ pub fn erase_spi_flash(em100: &Em100) -> Result<()> {
 
 /// Poll SPI flash status
 pub fn poll_spi_flash_status(em100: &Em100) -> Result<bool> {
-    let cmd = [0x32u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::poll_status())?;
 
     let data = usb::get_response(em100, 1)?;
 
@@ -57,25 +55,7 @@ pub fn read_spi_flash_page(em100: &Em100, address: u32, buffer: &mut [u8]) -> Re
         ));
     }
 
-    let cmd = [
-        0x33u8,
-        ((address >> 16) & 0xff) as u8,
-        ((address >> 8) & 0xff) as u8,
-        (address & 0xff) as u8,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::read_page(address))?;
 
     let data = usb::get_response(em100, 256)?;
 
@@ -95,25 +75,7 @@ pub fn write_spi_flash_page(em100: &Em100, address: u32, data: &[u8]) -> Result<
         ));
     }
 
-    let cmd = [
-        0x34u8,
-        ((address >> 16) & 0xff) as u8,
-        ((address >> 8) & 0xff) as u8,
-        (address & 0xff) as u8,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::write_page(address))?;
 
     // Pad data to 256 bytes if needed
     let mut page = [0xffu8; 256];
@@ -139,8 +101,7 @@ pub fn write_spi_flash_page(em100: &Em100, address: u32, data: &[u8]) -> Result<
 
 /// Unlock SPI flash
 pub fn unlock_spi_flash(em100: &Em100) -> Result<()> {
-    let cmd = [0x36u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::unlock())?;
     Ok(())
 }
 
@@ -158,8 +119,7 @@ pub fn erase_spi_flash_sector(em100: &Em100, sector: u8) -> Result<()> {
         )));
     }
 
-    let cmd = [0x37u8, sector, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::erase_sector(sector))?;
 
     Ok(())
 }
@@ -187,8 +147,7 @@ pub const DFIFO_EMPTY: u8 = 1 << 6;
 
 /// Read HT register
 pub fn read_ht_register(em100: &Em100, reg: HtRegister) -> Result<u8> {
-    let cmd = [0x50u8, reg as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::read_ht_register(reg as u8))?;
 
     let data = usb::get_response(em100, 2)?;
 
@@ -201,10 +160,7 @@ pub fn read_ht_register(em100: &Em100, reg: HtRegister) -> Result<u8> {
 
 /// Write HT register
 pub fn write_ht_register(em100: &Em100, reg: HtRegister, val: u8) -> Result<()> {
-    let cmd = [
-        0x51u8, reg as u8, val, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::write_ht_register(reg as u8, val))?;
     Ok(())
 }
 
@@ -217,25 +173,7 @@ pub fn write_dfifo(em100: &Em100, data: &[u8], timeout: u16) -> Result<()> {
     }
 
     let length = data.len();
-    let cmd = [
-        0x52u8,
-        ((length >> 8) & 0xff) as u8,
-        (length & 0xff) as u8,
-        ((timeout >> 8) & 0xff) as u8,
-        (timeout & 0xff) as u8,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::write_dfifo(length as u16, timeout))?;
 
     let buf = Buffer::from(data.to_vec());
     let completion = em100
@@ -265,25 +203,7 @@ pub fn read_ufifo(em100: &Em100, length: usize, timeout: u16) -> Result<Vec<u8>>
         ));
     }
 
-    let cmd = [
-        0x53u8,
-        ((length >> 8) & 0xff) as u8,
-        (length & 0xff) as u8,
-        ((timeout >> 8) & 0xff) as u8,
-        (timeout & 0xff) as u8,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ];
-    usb::send_cmd(em100, &cmd)?;
+    usb::send_command(em100, command::read_ufifo(length as u16, timeout))?;
 
     let data = usb::get_response(em100, 512)?;
 

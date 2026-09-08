@@ -13,6 +13,7 @@ fn main() -> eframe::Result<()> {
 mod wasm_app {
     use egui::Color32;
     use em100::chips::{ChipDatabase, ChipDesc};
+    use em100::trace::{TraceEvent, TraceState, decode_spi_trace_reports, trace_display_tail};
     use em100::web_device::{DeviceInfo, Em100Async, HoldPinState};
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -59,6 +60,12 @@ mod wasm_app {
         progress_message: String,
         download_data: Option<Vec<u8>>, // data downloaded from device
         pending_file: Option<(String, Vec<u8>)>, // (filename, data) from file picker
+        configured_chip: Option<Rc<ChipDesc>>,
+        address_mode: u8,
+        trace_running: bool,
+        trace_active: bool,
+        trace_generation: u64,
+        trace_output: String,
     }
 
     impl Default for SharedState {
@@ -74,6 +81,12 @@ mod wasm_app {
                 progress_message: String::new(),
                 download_data: None,
                 pending_file: None,
+                configured_chip: None,
+                address_mode: 3,
+                trace_running: false,
+                trace_active: false,
+                trace_generation: 0,
+                trace_output: String::new(),
             }
         }
     }
@@ -96,6 +109,10 @@ mod wasm_app {
         start_address: String,
         /// Address mode (3 or 4)
         address_mode: u8,
+        /// Compact trace output
+        trace_brief: bool,
+        /// Address offset applied to trace output
+        trace_address_offset: String,
         /// Current panel
         current_panel: Panel,
         /// Status message
@@ -109,6 +126,7 @@ mod wasm_app {
         #[default]
         Device,
         Debug,
+        Trace,
     }
 
     impl Em100WebApp {
@@ -138,6 +156,8 @@ mod wasm_app {
                 upload_filename: String::new(),
                 start_address: "0".to_string(),
                 address_mode: 3,
+                trace_brief: false,
+                trace_address_offset: "0".to_string(),
                 current_panel: Panel::Device,
                 status_message: "Click 'Connect Device' to connect via WebUSB".to_string(),
                 status_is_error: false,
@@ -188,13 +208,32 @@ mod wasm_app {
 
         fn disconnect(&mut self) {
             let mut s = self.state.borrow_mut();
+            s.trace_running = false;
+            s.trace_active = false;
+            s.trace_generation = s.trace_generation.wrapping_add(1);
             s.device = None;
             s.device_info = None;
+            s.configured_chip = None;
+            s.address_mode = 3;
             s.connection_state = ConnectionState::Disconnected;
             s.async_op = AsyncOp::Success("Disconnected".to_string());
+            self.selected_chip = None;
+            self.address_mode = 3;
         }
 
         fn set_emulation_state(&mut self, running: bool) {
+            if self.state.borrow().trace_active {
+                self.state.borrow_mut().async_op = AsyncOp::Error(
+                    "Wait for trace capture cleanup before changing emulation state".to_string(),
+                );
+                return;
+            }
+            if running && self.state.borrow().configured_chip.is_none() {
+                self.state.borrow_mut().async_op = AsyncOp::Error(
+                    "Select and configure a chip before starting emulation".to_string(),
+                );
+                return;
+            }
             let state = self.state.clone();
             state.borrow_mut().async_op = AsyncOp::InProgress(
                 if running {
@@ -246,6 +285,12 @@ mod wasm_app {
 
         fn set_address_mode(&mut self, mode: u8) {
             let state = self.state.clone();
+            if state.borrow().trace_active {
+                state.borrow_mut().async_op = AsyncOp::Error(
+                    "Wait for trace capture cleanup before changing address mode".to_string(),
+                );
+                return;
+            }
             state.borrow_mut().async_op =
                 AsyncOp::InProgress(format!("Setting {}-byte address mode...", mode));
 
@@ -268,6 +313,7 @@ mod wasm_app {
                 s.device = device;
                 match result {
                     Some(Ok(_)) => {
+                        s.address_mode = mode;
                         s.async_op = AsyncOp::Success(format!("Address mode set to {}-byte", mode));
                     }
                     Some(Err(e)) => {
@@ -282,6 +328,12 @@ mod wasm_app {
 
         fn set_hold_pin(&mut self, hold_state: HoldPinState) {
             let state = self.state.clone();
+            if state.borrow().trace_active {
+                state.borrow_mut().async_op = AsyncOp::Error(
+                    "Wait for trace capture cleanup before changing the hold pin".to_string(),
+                );
+                return;
+            }
             state.borrow_mut().async_op = AsyncOp::InProgress("Setting hold pin...".to_string());
 
             spawn_local(async move {
@@ -318,9 +370,21 @@ mod wasm_app {
 
         fn set_chip(&mut self, chip: Rc<ChipDesc>) {
             let state = self.state.clone();
+            if state.borrow().trace_active {
+                state.borrow_mut().async_op = AsyncOp::Error(
+                    "Wait for trace capture cleanup before changing chips".to_string(),
+                );
+                return;
+            }
             let chip_for_async = chip.clone();
-            state.borrow_mut().async_op =
-                AsyncOp::InProgress(format!("Setting chip to {} {}...", chip.vendor, chip.name));
+            {
+                let mut s = state.borrow_mut();
+                s.configured_chip = None;
+                s.async_op = AsyncOp::InProgress(format!(
+                    "Setting chip to {} {}...",
+                    chip.vendor, chip.name
+                ));
+            }
 
             spawn_local(async move {
                 // Take device out of state to avoid holding borrow across await
@@ -330,7 +394,7 @@ mod wasm_app {
                 };
 
                 let (result, device) = if let Some(mut dev) = device {
-                    let res = dev.set_chip_type(&*chip_for_async).await;
+                    let res = dev.set_chip_type(&chip_for_async).await;
                     (Some(res), Some(dev))
                 } else {
                     (None, None)
@@ -343,14 +407,11 @@ mod wasm_app {
                     Some(Ok(_)) => {
                         // set_chip_type stops emulation, so update is_running
                         s.is_running = false;
-                        let mode_msg = if chip_for_async.size > 16 * 1024 * 1024 {
-                            " (4-byte address mode enabled)"
-                        } else {
-                            ""
-                        };
+                        s.address_mode = chip_for_async.default_address_mode();
+                        s.configured_chip = Some(chip_for_async.clone());
                         s.async_op = AsyncOp::Success(format!(
-                            "Chip set to {} {}{}",
-                            chip_for_async.vendor, chip_for_async.name, mode_msg
+                            "Chip set to {} {} ({}-byte addressing)",
+                            chip_for_async.vendor, chip_for_async.name, s.address_mode
                         ));
                     }
                     Some(Err(e)) => {
@@ -361,8 +422,147 @@ mod wasm_app {
                     }
                 }
             });
+        }
 
-            self.selected_chip = Some(chip);
+        fn start_trace(&mut self, ctx: &egui::Context) {
+            let address_offset = match parse_hex(&self.trace_address_offset) {
+                Some(offset) => offset,
+                None => {
+                    self.state.borrow_mut().async_op =
+                        AsyncOp::Error("Invalid trace address offset".to_string());
+                    return;
+                }
+            };
+
+            let generation = {
+                let mut s = self.state.borrow_mut();
+                if s.configured_chip.is_none() {
+                    s.async_op = AsyncOp::Error(
+                        "Select and configure a chip before starting trace capture".to_string(),
+                    );
+                    return;
+                }
+                if s.trace_active {
+                    return;
+                }
+                s.trace_generation = s.trace_generation.wrapping_add(1);
+                s.trace_running = true;
+                s.trace_active = true;
+                s.async_op = AsyncOp::InProgress("Starting SPI trace capture...".to_string());
+                s.trace_generation
+            };
+
+            let state = self.state.clone();
+            let repaint = ctx.clone();
+            let brief = self.trace_brief;
+            let address_mode = self.address_mode;
+            spawn_local(async move {
+                let mut device = state.borrow_mut().device.take();
+                let reset_result = match device.as_mut() {
+                    Some(device) => device.reset_spi_trace().await,
+                    None => Err(em100::Error::DeviceNotFound),
+                };
+                {
+                    let mut s = state.borrow_mut();
+                    if s.trace_generation != generation {
+                        repaint.request_repaint();
+                        return;
+                    }
+                    s.device = device;
+                }
+
+                if let Err(error) = reset_result {
+                    let mut s = state.borrow_mut();
+                    s.trace_running = false;
+                    s.trace_active = false;
+                    s.async_op = AsyncOp::Error(format!("Failed to start trace: {error}"));
+                    repaint.request_repaint();
+                    return;
+                }
+
+                state.borrow_mut().async_op =
+                    AsyncOp::Success("SPI trace capture started".to_string());
+                let mut decoder = TraceState::new(brief, address_mode);
+                let mut capture_error = None;
+
+                loop {
+                    let keep_running = {
+                        let s = state.borrow();
+                        s.trace_running && s.trace_generation == generation
+                    };
+                    if !keep_running {
+                        break;
+                    }
+
+                    let mut device = state.borrow_mut().device.take();
+                    let reports = match device.as_mut() {
+                        Some(device) => device.read_spi_trace_reports().await,
+                        None => Err(em100::Error::DeviceNotFound),
+                    };
+                    {
+                        let mut s = state.borrow_mut();
+                        if s.trace_generation != generation {
+                            repaint.request_repaint();
+                            return;
+                        }
+                        s.device = device;
+                        if !s.trace_running {
+                            break;
+                        }
+                    }
+
+                    match reports.and_then(|reports| {
+                        decode_spi_trace_reports(&reports, &mut decoder, address_offset)
+                    }) {
+                        Ok(events) => {
+                            let output: String = events
+                                .into_iter()
+                                .filter_map(|event| match event {
+                                    TraceEvent::Output(output) => Some(output),
+                                    TraceEvent::Timestamp => None,
+                                })
+                                .collect();
+                            if !output.is_empty() {
+                                let mut s = state.borrow_mut();
+                                s.trace_output.push_str(&output);
+                                trim_trace_output(&mut s.trace_output);
+                            }
+                        }
+                        Err(error) => {
+                            state.borrow_mut().trace_running = false;
+                            capture_error = Some(error);
+                            break;
+                        }
+                    }
+                    repaint.request_repaint();
+                }
+
+                let mut device = state.borrow_mut().device.take();
+                if let Some(device) = device.as_mut() {
+                    let _ = device.reset_spi_trace().await;
+                }
+                let mut s = state.borrow_mut();
+                if s.trace_generation != generation {
+                    repaint.request_repaint();
+                    return;
+                }
+                s.device = device;
+                s.trace_running = false;
+                s.trace_active = false;
+                s.async_op = match capture_error {
+                    Some(error) => AsyncOp::Error(format!("Trace capture failed: {error}")),
+                    None => AsyncOp::Success("SPI trace capture stopped".to_string()),
+                };
+                repaint.request_repaint();
+            });
+        }
+
+        fn stop_trace(&mut self) {
+            let mut s = self.state.borrow_mut();
+            if s.trace_running {
+                s.trace_running = false;
+                s.async_op = AsyncOp::InProgress("Stopping SPI trace capture...".to_string());
+            }
         }
 
         fn select_file(&mut self) {
@@ -560,6 +760,8 @@ mod wasm_app {
             let state = self.state.borrow();
             let is_connected = matches!(state.connection_state, ConnectionState::Connected);
             let is_connecting = matches!(state.connection_state, ConnectionState::Connecting);
+            let disconnect_busy =
+                !state.trace_active && matches!(state.async_op, AsyncOp::InProgress(_));
             drop(state);
 
             // Connect/disconnect buttons
@@ -574,7 +776,10 @@ mod wasm_app {
                     self.request_device();
                 }
                 if ui
-                    .add_enabled(is_connected, egui::Button::new("Disconnect"))
+                    .add_enabled(
+                        is_connected && !disconnect_busy,
+                        egui::Button::new("Disconnect"),
+                    )
                     .clicked()
                 {
                     self.disconnect();
@@ -641,6 +846,9 @@ mod wasm_app {
 
             let is_running = state.is_running;
             let hold_pin_state = state.hold_pin_state;
+            let chip_configured = state.configured_chip.is_some();
+            let trace_active = state.trace_active;
+            let is_busy = matches!(state.async_op, AsyncOp::InProgress(_));
             drop(state);
 
             // Control panel
@@ -649,86 +857,7 @@ mod wasm_app {
                 ui.separator();
                 ui.heading("Control");
 
-                ui.horizontal(|ui| {
-                    ui.label("Emulation:");
-                    if ui
-                        .add_enabled(!is_running, egui::Button::new("Start"))
-                        .clicked()
-                    {
-                        self.set_emulation_state(true);
-                    }
-                    if ui
-                        .add_enabled(is_running, egui::Button::new("Stop"))
-                        .clicked()
-                    {
-                        self.set_emulation_state(false);
-                    }
-
-                    let status_text = if is_running {
-                        egui::RichText::new("Running").color(Color32::GREEN)
-                    } else {
-                        egui::RichText::new("Stopped").color(Color32::RED)
-                    };
-                    ui.label(status_text);
-                });
-
-                ui.add_space(8.0);
-
-                let mut hold_pin_to_set: Option<HoldPinState> = None;
-                ui.horizontal(|ui| {
-                    ui.label("Hold Pin:");
-                    egui::ComboBox::from_id_salt("hold_pin")
-                        .selected_text(format!("{}", hold_pin_state))
-                        .show_ui(ui, |ui| {
-                            if ui
-                                .selectable_label(hold_pin_state == HoldPinState::Float, "Float")
-                                .clicked()
-                            {
-                                hold_pin_to_set = Some(HoldPinState::Float);
-                            }
-                            if ui
-                                .selectable_label(hold_pin_state == HoldPinState::Low, "Low")
-                                .clicked()
-                            {
-                                hold_pin_to_set = Some(HoldPinState::Low);
-                            }
-                            if ui
-                                .selectable_label(hold_pin_state == HoldPinState::Input, "Input")
-                                .clicked()
-                            {
-                                hold_pin_to_set = Some(HoldPinState::Input);
-                            }
-                        });
-                });
-                if let Some(new_state) = hold_pin_to_set {
-                    self.set_hold_pin(new_state);
-                }
-
-                ui.add_space(8.0);
-                let mut address_mode_to_set: Option<u8> = None;
-                ui.horizontal(|ui| {
-                    ui.label("Address Mode:");
-                    if ui
-                        .selectable_value(&mut self.address_mode, 3, "3-byte")
-                        .clicked()
-                    {
-                        address_mode_to_set = Some(3);
-                    }
-                    if ui
-                        .selectable_value(&mut self.address_mode, 4, "4-byte")
-                        .clicked()
-                    {
-                        address_mode_to_set = Some(4);
-                    }
-                });
-                if let Some(mode) = address_mode_to_set {
-                    self.set_address_mode(mode);
-                }
-
-                ui.add_space(8.0);
-
-                // Chip selection
-                ui.label("Chip:");
+                ui.label(egui::RichText::new("1. Select and configure the flash chip").strong());
 
                 let mut chip_to_set: Option<Rc<ChipDesc>> = None;
                 let popup_id = ui.make_persistent_id("chip_selector_popup");
@@ -737,17 +866,15 @@ mod wasm_app {
                 } else {
                     "Select chip...".to_string()
                 };
-
-                // Custom combo-box-like button
-                let button = egui::Button::new(egui::RichText::new(format!("{} ▼", selected_text)))
-                    .min_size(egui::vec2(500.0, 0.0));
-                let response = ui.add(button);
-
+                let response = ui.add_enabled(
+                    !is_busy && !trace_active,
+                    egui::Button::new(egui::RichText::new(format!("{} ▼", selected_text)))
+                        .min_size(egui::vec2(500.0, 0.0)),
+                );
                 if response.clicked() {
                     ui.memory_mut(|mem| mem.toggle_popup(popup_id));
                 }
 
-                // Use popup with CloseOnClickOutside so clicking the search field doesn't close it
                 let search_field_id = ui.make_persistent_id("chip_search_field");
                 egui::popup::popup_below_widget(
                     ui,
@@ -756,8 +883,6 @@ mod wasm_app {
                     egui::popup::PopupCloseBehavior::CloseOnClickOutside,
                     |ui| {
                         ui.set_min_width(500.0);
-
-                        // Search filter - always request focus so it's ready for typing
                         let search_response = ui.add(
                             egui::TextEdit::singleline(&mut self.chip_search)
                                 .id(search_field_id)
@@ -765,8 +890,6 @@ mod wasm_app {
                         );
                         search_response.request_focus();
                         ui.separator();
-
-                        // Filter and display chips using pre-computed names
                         let search_lower = self.chip_search.to_lowercase();
                         egui::ScrollArea::vertical()
                             .max_height(500.0)
@@ -795,9 +918,114 @@ mod wasm_app {
                             });
                     },
                 );
-
                 if let Some(chip) = chip_to_set {
                     self.set_chip(chip);
+                }
+
+                if let Some((inferred_mode, size_mib)) = self
+                    .selected_chip
+                    .as_ref()
+                    .map(|chip| (chip.default_address_mode(), chip.size / (1024 * 1024)))
+                {
+                    ui.label(format!(
+                        "Addressing: {}-byte (selected automatically for this chip)",
+                        self.address_mode
+                    ));
+                    ui.collapsing("Advanced addressing override", |ui| {
+                        ui.label(format!(
+                            "The chip database does not describe addressing capabilities; {}-byte is inferred from the {} MiB capacity.",
+                            inferred_mode,
+                            size_mib
+                        ));
+                        let mut requested_mode = self.address_mode;
+                        ui.add_enabled_ui(!is_busy && !trace_active, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(&mut requested_mode, 3, "3-byte");
+                                ui.selectable_value(&mut requested_mode, 4, "4-byte");
+                            });
+                        });
+                        if requested_mode != self.address_mode {
+                            self.set_address_mode(requested_mode);
+                        }
+                    });
+                } else {
+                    ui.label(
+                        egui::RichText::new("Select a chip to enable emulation and trace capture.")
+                            .italics(),
+                    );
+                }
+
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new("2. Start emulation").strong());
+
+                ui.horizontal(|ui| {
+                    ui.label("Emulation:");
+                    let start = ui.add_enabled(
+                        !is_running && chip_configured && !is_busy && !trace_active,
+                        egui::Button::new("Start"),
+                    );
+                    if start.clicked() {
+                        self.set_emulation_state(true);
+                    }
+                    if !chip_configured {
+                        start.on_disabled_hover_text("Select and configure a chip first");
+                    }
+                    if ui
+                        .add_enabled(
+                            is_running && !is_busy && !trace_active,
+                            egui::Button::new("Stop"),
+                        )
+                        .clicked()
+                    {
+                        self.set_emulation_state(false);
+                    }
+
+                    let status_text = if is_running {
+                        egui::RichText::new("Running").color(Color32::GREEN)
+                    } else {
+                        egui::RichText::new("Stopped").color(Color32::RED)
+                    };
+                    ui.label(status_text);
+                });
+
+                ui.add_space(8.0);
+
+                let mut hold_pin_to_set: Option<HoldPinState> = None;
+                ui.add_enabled_ui(!is_busy && !trace_active, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Hold Pin:");
+                        egui::ComboBox::from_id_salt("hold_pin")
+                            .selected_text(format!("{}", hold_pin_state))
+                            .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(
+                                        hold_pin_state == HoldPinState::Float,
+                                        "Float",
+                                    )
+                                    .clicked()
+                                {
+                                    hold_pin_to_set = Some(HoldPinState::Float);
+                                }
+                                if ui
+                                    .selectable_label(hold_pin_state == HoldPinState::Low, "Low")
+                                    .clicked()
+                                {
+                                    hold_pin_to_set = Some(HoldPinState::Low);
+                                }
+                                if ui
+                                    .selectable_label(
+                                        hold_pin_state == HoldPinState::Input,
+                                        "Input",
+                                    )
+                                    .clicked()
+                                {
+                                    hold_pin_to_set = Some(HoldPinState::Input);
+                                }
+                            });
+                    });
+                });
+                if let Some(new_state) = hold_pin_to_set {
+                    self.set_hold_pin(new_state);
                 }
 
                 // Memory operations section
@@ -809,7 +1037,8 @@ mod wasm_app {
                 let state = self.state.borrow();
                 let progress = state.progress;
                 let progress_message = state.progress_message.clone();
-                let is_busy = matches!(state.async_op, AsyncOp::InProgress(_));
+                let is_busy =
+                    matches!(state.async_op, AsyncOp::InProgress(_)) || state.trace_active;
                 let download_data_len = state.download_data.as_ref().map(|d| d.len());
                 // Clone download data for save button (only when needed)
                 let download_data_for_save = state.download_data.clone();
@@ -888,6 +1117,81 @@ mod wasm_app {
             }
         }
 
+        fn trace_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+            ui.heading("SPI Trace");
+            ui.separator();
+
+            let state = self.state.borrow();
+            let is_connected = matches!(state.connection_state, ConnectionState::Connected);
+            let chip_configured = state.configured_chip.is_some();
+            let trace_running = state.trace_running;
+            let trace_active = state.trace_active;
+            let is_busy = matches!(state.async_op, AsyncOp::InProgress(_));
+            drop(state);
+
+            if !is_connected {
+                ui.label("Connect to a device first.");
+                return;
+            }
+
+            ui.horizontal(|ui| {
+                let start = ui.add_enabled(
+                    !trace_active && chip_configured && !is_busy,
+                    egui::Button::new("Start Trace"),
+                );
+                if start.clicked() {
+                    self.start_trace(ctx);
+                }
+                if !chip_configured {
+                    start.on_disabled_hover_text("Select and configure a chip first");
+                }
+                if ui
+                    .add_enabled(trace_running, egui::Button::new("Stop Trace"))
+                    .clicked()
+                {
+                    self.stop_trace();
+                }
+                if ui.button("Clear").clicked() {
+                    self.state.borrow_mut().trace_output.clear();
+                }
+            });
+
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(!trace_active, |ui| {
+                    ui.checkbox(&mut self.trace_brief, "Brief");
+                    ui.label("Address offset:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.trace_address_offset)
+                            .desired_width(120.0),
+                    );
+                });
+            });
+
+            if !chip_configured {
+                ui.label(
+                    egui::RichText::new(
+                        "Select a chip on the Device tab before capturing a trace.",
+                    )
+                    .italics(),
+                );
+            }
+
+            ui.add_space(8.0);
+            egui::ScrollArea::vertical()
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    let state = self.state.borrow();
+                    let mut output = trace_display_tail(&state.trace_output);
+
+                    ui.add(
+                        egui::TextEdit::multiline(&mut output)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(f32::INFINITY)
+                            .interactive(false),
+                    );
+                });
+        }
+
         /// Render debug panel
         fn debug_panel(&mut self, ui: &mut egui::Ui) {
             ui.heading("Debug Information");
@@ -908,6 +1212,12 @@ mod wasm_app {
 
     impl eframe::App for Em100WebApp {
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+            {
+                let state = self.state.borrow();
+                self.selected_chip = state.configured_chip.clone();
+                self.address_mode = state.address_mode;
+            }
+
             // Check for pending file from file picker
             if let Ok(mut state) = self.state.try_borrow_mut() {
                 if let Some((filename, data)) = state.pending_file.take() {
@@ -945,6 +1255,7 @@ mod wasm_app {
                     ui.separator();
 
                     ui.selectable_value(&mut self.current_panel, Panel::Device, "Device");
+                    ui.selectable_value(&mut self.current_panel, Panel::Trace, "Trace");
                     ui.selectable_value(&mut self.current_panel, Panel::Debug, "Debug");
                 });
             });
@@ -964,6 +1275,7 @@ mod wasm_app {
             // Central panel
             egui::CentralPanel::default().show(ctx, |ui| match self.current_panel {
                 Panel::Device => self.device_panel(ui),
+                Panel::Trace => self.trace_panel(ui, ctx),
                 Panel::Debug => self.debug_panel(ui),
             });
 
@@ -971,10 +1283,24 @@ mod wasm_app {
             let state = self.state.borrow();
             if matches!(state.async_op, AsyncOp::InProgress(_))
                 || matches!(state.connection_state, ConnectionState::Connecting)
+                || state.trace_active
             {
-                ctx.request_repaint();
+                ctx.request_repaint_after(std::time::Duration::from_millis(50));
             }
         }
+    }
+
+    fn trim_trace_output(output: &mut String) {
+        const MAX_TRACE_OUTPUT: usize = 2 * 1024 * 1024;
+        if output.len() <= MAX_TRACE_OUTPUT {
+            return;
+        }
+        let excess = output.len() - MAX_TRACE_OUTPUT;
+        let boundary = output[excess..]
+            .find('\n')
+            .map(|offset| excess + offset + 1)
+            .unwrap_or(excess);
+        output.drain(..boundary);
     }
 
     /// Parse hex string (with or without 0x prefix)

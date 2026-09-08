@@ -3,6 +3,7 @@
 use crate::chips::ChipDesc;
 use crate::error::{Error, Result};
 use crate::fpga;
+use crate::protocol::{chip as chip_command, fpga as fpga_command, fpga::Register};
 use crate::sdram;
 use crate::spi;
 use crate::system;
@@ -251,13 +252,17 @@ impl Em100 {
 
     /// Start or stop emulation
     pub fn set_state(&self, run: bool) -> Result<()> {
-        fpga::write_fpga_register(self, 0x28, if run { 1 } else { 0 })?;
+        fpga::write_fpga_register(
+            self,
+            Register::EMULATION_STATE.address(),
+            if run { 1 } else { 0 },
+        )?;
         Ok(())
     }
 
     /// Get current emulation state
     pub fn get_state(&self) -> Result<bool> {
-        let state = fpga::read_fpga_register(self, 0x28)?;
+        let state = fpga::read_fpga_register(self, Register::EMULATION_STATE.address())?;
         Ok(state != 0)
     }
 
@@ -269,13 +274,17 @@ impl Em100 {
                 mode
             )));
         }
-        fpga::write_fpga_register(self, 0x4f, if mode == 4 { 1 } else { 0 })?;
+        fpga::write_fpga_register(
+            self,
+            Register::ADDRESS_MODE.address(),
+            if mode == 4 { 1 } else { 0 },
+        )?;
         Ok(())
     }
 
     /// Get current hold pin state
     pub fn get_hold_pin_state(&self) -> Result<HoldPinState> {
-        let val = fpga::read_fpga_register(self, 0x2a)?;
+        let val = fpga::read_fpga_register(self, Register::HOLD_PIN.address())?;
         match val {
             0 => Ok(HoldPinState::Low),
             2 => Ok(HoldPinState::Float),
@@ -287,17 +296,17 @@ impl Em100 {
     /// Set hold pin state
     pub fn set_hold_pin_state(&self, state: HoldPinState) -> Result<()> {
         // Read and acknowledge current state
-        let val = fpga::read_fpga_register(self, 0x2a)?;
-        fpga::write_fpga_register(self, 0x2a, (1 << 2) | val)?;
+        let val = fpga::read_fpga_register(self, Register::HOLD_PIN.address())?;
+        fpga::write_fpga_register(self, Register::HOLD_PIN.address(), (1 << 2) | val)?;
 
         // Read again
-        let _ = fpga::read_fpga_register(self, 0x2a)?;
+        let _ = fpga::read_fpga_register(self, Register::HOLD_PIN.address())?;
 
         // Set desired state
-        fpga::write_fpga_register(self, 0x2a, state as u16)?;
+        fpga::write_fpga_register(self, Register::HOLD_PIN.address(), state as u16)?;
 
         // Verify
-        let new_val = fpga::read_fpga_register(self, 0x2a)?;
+        let new_val = fpga::read_fpga_register(self, Register::HOLD_PIN.address())?;
         if new_val != state as u16 {
             return Err(Error::OperationFailed(format!(
                 "Failed to set hold pin state. Expected {:?}, got {}",
@@ -342,13 +351,13 @@ impl Em100 {
 
         // Send init sequence
         for entry in chip.init.iter().take(chip.init_len) {
-            usb::send_cmd(self, entry)?;
+            usb::send_command(self, chip_command::initialize(entry))?;
         }
 
         // Set FPGA registers
-        fpga::write_fpga_register(self, 0xc4, 0x01)?;
-        fpga::write_fpga_register(self, 0x10, 0x00)?;
-        fpga::write_fpga_register(self, 0x81, 0x00)?;
+        fpga::write_fpga_register(self, Register::CHIP_CONFIG_C4.address(), 0x01)?;
+        fpga::write_fpga_register(self, Register::CHIP_CONFIG_10.address(), 0x00)?;
+        fpga::write_fpga_register(self, Register::CHIP_CONFIG_81.address(), 0x00)?;
 
         Ok(())
     }
@@ -357,13 +366,7 @@ impl Em100 {
     pub fn set_fpga_voltage(&mut self, voltage_code: u8) -> Result<bool> {
         fpga::fpga_reconfigure(self)?;
 
-        let mut cmd = [0u8; 16];
-        cmd[0] = 0x24;
-        if voltage_code == 18 {
-            cmd[2] = 7;
-            cmd[3] = 0x80;
-        }
-        usb::send_cmd(self, &cmd)?;
+        usb::send_command(self, fpga_command::set_voltage(voltage_code))?;
 
         // Must wait 2s before issuing any other USB command
         std::thread::sleep(Duration::from_secs(2));

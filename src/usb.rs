@@ -2,6 +2,7 @@
 
 use crate::device::Em100;
 use crate::error::{Error, Result};
+use crate::protocol::Command;
 use nusb::transfer::Buffer;
 use std::time::Duration;
 
@@ -14,13 +15,25 @@ fn round_up_to_max_packet(len: usize, max_packet_size: usize) -> usize {
     len.div_ceil(max_packet_size) * max_packet_size
 }
 
-/// Send a 16-byte command to the EM100
-pub fn send_cmd(em100: &Em100, data: &[u8]) -> Result<()> {
-    let mut cmd = [0u8; 16];
-    let len = std::cmp::min(data.len(), 16);
-    cmd[..len].copy_from_slice(&data[..len]);
+/// Send a typed 16-byte command to the EM100.
+pub fn send_command(em100: &Em100, command: Command) -> Result<()> {
+    use zerocopy::IntoBytes;
 
-    let buf = Buffer::from(cmd.to_vec());
+    send_bytes(em100, command.as_bytes())
+}
+
+/// Send a command prefix, padding or truncating it to 16 bytes.
+///
+/// Prefer [`send_command`] for commands represented by the shared protocol API.
+pub fn send_cmd(em100: &Em100, data: &[u8]) -> Result<()> {
+    let mut command = [0; 16];
+    let length = data.len().min(command.len());
+    command[..length].copy_from_slice(&data[..length]);
+    send_bytes(em100, &command)
+}
+
+fn send_bytes(em100: &Em100, command: &[u8]) -> Result<()> {
+    let buf = Buffer::from(command.to_vec());
     let completion = em100
         .endpoint_out
         .borrow_mut()

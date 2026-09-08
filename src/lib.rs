@@ -40,6 +40,7 @@
 pub mod chips;
 pub mod error;
 pub mod hexdump;
+pub mod protocol;
 
 // Image module requires device types
 #[cfg(not(target_arch = "wasm32"))]
@@ -58,7 +59,6 @@ pub mod sdram;
 pub mod spi;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod system;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod trace;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod usb;

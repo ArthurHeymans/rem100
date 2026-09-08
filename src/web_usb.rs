@@ -4,6 +4,7 @@
 //! with the WebUSB API in browsers.
 
 use crate::error::{Error, Result};
+use crate::protocol::Command;
 use nusb::Endpoint;
 use nusb::transfer::{Buffer, Bulk, In, Out};
 
@@ -12,13 +13,25 @@ fn round_up_to_max_packet(len: usize, max_packet_size: usize) -> usize {
     len.div_ceil(max_packet_size) * max_packet_size
 }
 
-/// Send a 16-byte command to the EM100 (async)
-pub async fn send_cmd(endpoint_out: &mut Endpoint<Bulk, Out>, data: &[u8]) -> Result<()> {
-    let mut cmd = [0u8; 16];
-    let len = std::cmp::min(data.len(), 16);
-    cmd[..len].copy_from_slice(&data[..len]);
+/// Send a typed 16-byte command to the EM100 (async).
+pub async fn send_command(endpoint_out: &mut Endpoint<Bulk, Out>, command: Command) -> Result<()> {
+    use zerocopy::IntoBytes;
 
-    let buf = Buffer::from(cmd.to_vec());
+    send_bytes(endpoint_out, command.as_bytes()).await
+}
+
+/// Send a command prefix, padding or truncating it to 16 bytes.
+///
+/// Prefer [`send_command`] for commands represented by the shared protocol API.
+pub async fn send_cmd(endpoint_out: &mut Endpoint<Bulk, Out>, data: &[u8]) -> Result<()> {
+    let mut command = [0; 16];
+    let length = data.len().min(command.len());
+    command[..length].copy_from_slice(&data[..length]);
+    send_bytes(endpoint_out, &command).await
+}
+
+async fn send_bytes(endpoint_out: &mut Endpoint<Bulk, Out>, command: &[u8]) -> Result<()> {
+    let buf = Buffer::from(command.to_vec());
     endpoint_out.submit(buf);
 
     let completion = std::future::poll_fn(|cx| endpoint_out.poll_next_complete(cx)).await;
