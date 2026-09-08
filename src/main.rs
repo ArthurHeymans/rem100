@@ -334,15 +334,6 @@ fn main() {
             std::process::exit(1);
         }
         println!("Chip set to {} {}.", chip.vendor, chip.name);
-
-        // Auto-enable 4-byte mode for large chips
-        if args.address_mode.is_none() && chip.size > 16 * 1024 * 1024 {
-            if let Err(e) = em100.set_address_mode(4) {
-                eprintln!("Warning: {}", e);
-            } else {
-                println!("Enabled 4 byte address mode");
-            }
-        }
     }
 
     // Set address mode
