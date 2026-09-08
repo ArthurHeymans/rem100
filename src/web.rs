@@ -235,9 +235,7 @@ impl Em100App {
             if let Ok(mut em100) = device.lock() {
                 // Stop emulation before changing chip type (matches CLI --stop --set pattern)
                 let _ = em100.set_state(false);
-                em100
-                    .set_chip_type(&chip)
-                    .and_then(|_| em100.set_address_mode(chip.default_address_mode()))
+                em100.set_chip_type(&chip)
             } else {
                 return;
             }

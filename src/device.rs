@@ -359,6 +359,10 @@ impl Em100 {
         fpga::write_fpga_register(self, Register::CHIP_CONFIG_10.address(), 0x00)?;
         fpga::write_fpga_register(self, Register::CHIP_CONFIG_81.address(), 0x00)?;
 
+        // Reset the address width on every chip change, including when moving
+        // from a large chip back to a 3-byte-addressed chip.
+        self.set_address_mode(chip.default_address_mode())?;
+
         Ok(())
     }
 
