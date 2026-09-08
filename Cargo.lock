@@ -2470,7 +2470,7 @@ dependencies = [
  "reqwest",
  "rfd",
  "tar",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tracing-wasm",
  "wasm-bindgen",
  "wasm-bindgen-futures",
