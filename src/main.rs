@@ -523,11 +523,25 @@ fn main() {
     if args.trace || args.terminal || args.traceconsole {
         const MAX_USB_ERRORS: u32 = 10;
 
-        // Set hold pin to input if not explicitly set
+        // Let the target drive the hold pin while tracing, but only if it is
+        // floating, meaning nothing has asked for a particular state. Any
+        // other state was set deliberately, and boards with their own flash
+        // chip on the bus need it held low throughout, or they do not boot.
+        let mut released_hold_pin = false;
         if args.holdpin.is_none() {
-            if let Err(e) = em100.set_hold_pin_state(HoldPinState::Input) {
-                eprintln!("Error: Failed to set EM100 to input: {}", e);
-                std::process::exit(1);
+            match em100.get_hold_pin_state() {
+                Ok(HoldPinState::Float) => {
+                    if let Err(e) = em100.set_hold_pin_state(HoldPinState::Input) {
+                        eprintln!("Error: Failed to set EM100 to input: {}", e);
+                        std::process::exit(1);
+                    }
+                    released_hold_pin = true;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("Error: Failed to read the hold pin state: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
 
@@ -598,8 +612,8 @@ fn main() {
             trace::reset_spi_trace(&em100).ok();
         }
 
-        // Reset hold pin to float
-        if args.holdpin.is_none() {
+        // Put the hold pin back only if it was taken over above
+        if released_hold_pin {
             if let Err(e) = em100.set_hold_pin_state(HoldPinState::Float) {
                 eprintln!("Error: Failed to set EM100 to float: {}", e);
             }
