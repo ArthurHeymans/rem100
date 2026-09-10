@@ -103,6 +103,11 @@ pub mod fpga {
         pub const HOLD_PIN: Self = Self(0x2a);
         pub const ADDRESS_MODE: Self = Self(0x4f);
         pub const SPI_COMMAND: Self = Self(0x82);
+        /// Hyper-terminal setup registers, written with 0 by the Windows
+        /// software when starting its hyper terminal (register 0x81 only
+        /// on EM100Pro-G2, at application start).
+        pub const TERMINAL_CTRL_81: Self = Self(0x81);
+        pub const TERMINAL_CTRL_83: Self = Self(0x83);
         pub const CHIP_CONFIG_C4: Self = Self(0xc4);
         pub const CHIP_CONFIG_10: Self = Self(0x10);
         pub const CHIP_CONFIG_81: Self = Self(0x81);
