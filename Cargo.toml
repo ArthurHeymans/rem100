@@ -22,6 +22,8 @@ native-gui = ["web", "rfd/xdg-portal"]
 # USB communication (native USB and browser WebUSB)
 nusb = "0.2.6"
 futures-lite = "2"
+# Async sleep and USB transfer timeouts (JS timers on wasm32)
+futures-timer = "3"
 
 # Error handling
 thiserror = "1"
@@ -47,8 +49,14 @@ poll-promise = { version = "0.3", optional = true, features = ["web"] }
 rfd = { version = "0.17", optional = true, default-features = false, features = ["xdg-portal"] }
 env_logger = { version = "0.11", optional = true }
 
+# nusb runs blocking syscalls (open, claim_interface, ...) on an IO thread
+# when awaited; without a runtime feature awaiting them panics.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+nusb = { version = "0.2.6", features = ["smol"] }
+
 # Web-specific dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+futures-timer = { version = "3", features = ["wasm-bindgen"] }
 # nusb 0.2.6 requires the typed WebUSB bindings from these releases.
 wasm-bindgen = "0.2.126"
 wasm-bindgen-futures = "0.4.76"

@@ -70,12 +70,12 @@ The codebase is structured to maximize code reuse between CLI and web interfaces
 Shared and native-library modules:
 
 - `chips.rs` - Chip database parsing shared by native and WebAssembly builds
-- `device.rs` - Native synchronous `Em100` device operations
-- `usb.rs` - Native low-level USB communication
-- `sdram.rs` - Native SDRAM operations with progress callbacks
-- `firmware.rs` - Native firmware operations with progress callbacks
-- `fpga.rs`, `spi.rs`, `system.rs` - Native hardware operations
-- `web_device.rs`, `web_usb.rs` - Asynchronous WebUSB operations for WebAssembly
+- `device.rs` - Async `Em100` device operations (the only device API;
+  native code drives the futures with `block_on`)
+- `usb.rs` - Async low-level USB communication
+- `sdram.rs` - SDRAM operations with progress callbacks
+- `firmware.rs` - Firmware operations with progress callbacks
+- `fpga.rs`, `spi.rs`, `system.rs` - Hardware operations
 
 ### CLI (`src/main.rs`)
 

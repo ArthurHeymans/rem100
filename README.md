@@ -60,16 +60,20 @@ rem100 = { version = "0.1", default-features = false }
 ```
 
 ```rust,no_run
-use em100::{list_devices, Em100, Result};
+use em100::Em100;
+use em100::Result;
+use futures_lite::future::block_on;
 
 fn main() -> Result<()> {
-    for (bus, address, serial) in list_devices()? {
-        println!("{bus}:{address} {serial}");
-    }
+    block_on(async {
+        for (bus, address, serial) in Em100::list_devices().await? {
+            println!("{bus}:{address} {serial}");
+        }
 
-    let device = Em100::open(None, None, None)?;
-    println!("{}", device.serial_string());
-    Ok(())
+        let device = Em100::open(None, None, None).await?;
+        println!("{}", device.serial_string());
+        Ok(())
+    })
 }
 ```
 

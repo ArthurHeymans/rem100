@@ -3,10 +3,11 @@
 //! This module provides a web-based GUI that mirrors the CLI functionality.
 
 use crate::chips::ChipDesc;
-use crate::device::{DeviceInfo, Em100, HoldPinState, list_devices};
+use crate::device::{DeviceInfo, Em100, HoldPinState};
 use crate::sdram::{read_sdram_with_progress, write_sdram_with_progress};
 use crate::trace::{self, TraceState};
 use egui::{Color32, RichText};
+use futures_lite::future::block_on;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -100,7 +101,7 @@ impl Em100App {
 
     /// Refresh the list of available devices
     fn refresh_devices(&mut self) {
-        match list_devices() {
+        match block_on(Em100::list_devices()) {
             Ok(devices) => {
                 self.available_devices = devices;
                 self.set_status("Device list refreshed", false);
@@ -120,11 +121,12 @@ impl Em100App {
             );
             return;
         }
-        match Em100::open(Some(bus), Some(addr), None) {
-            Ok(em100) => {
+        match block_on(Em100::open(Some(bus), Some(addr), None)) {
+            Ok(mut em100) => {
                 let info = em100.get_info();
-                self.is_running = em100.get_state().unwrap_or(false);
-                self.hold_pin_state = em100.get_hold_pin_state().unwrap_or(HoldPinState::Float);
+                self.is_running = block_on(em100.get_state()).unwrap_or(false);
+                self.hold_pin_state =
+                    block_on(em100.get_hold_pin_state()).unwrap_or(HoldPinState::Float);
                 self.device_info = Some(info.clone());
                 self.device = Some(Arc::new(Mutex::new(em100)));
                 self.selected_chip = None;
@@ -168,8 +170,8 @@ impl Em100App {
             return;
         }
         let result = if let Some(ref device) = self.device {
-            if let Ok(em100) = device.lock() {
-                em100.set_state(running)
+            if let Ok(mut em100) = device.lock() {
+                block_on(em100.set_state(running))
             } else {
                 return;
             }
@@ -205,8 +207,8 @@ impl Em100App {
             return;
         }
         let result = if let Some(ref device) = self.device {
-            if let Ok(em100) = device.lock() {
-                em100.set_hold_pin_state(state)
+            if let Ok(mut em100) = device.lock() {
+                block_on(em100.set_hold_pin_state(state))
             } else {
                 return;
             }
@@ -234,8 +236,8 @@ impl Em100App {
         let result = if let Some(ref device) = self.device {
             if let Ok(mut em100) = device.lock() {
                 // Stop emulation before changing chip type (matches CLI --stop --set pattern)
-                let _ = em100.set_state(false);
-                em100.set_chip_type(&chip)
+                let _ = block_on(em100.set_state(false));
+                block_on(em100.set_chip_type(&chip))
             } else {
                 return;
             }
@@ -271,13 +273,15 @@ impl Em100App {
         let start_addr = parse_hex(&self.start_address).unwrap_or(0) as u32;
 
         let result = if let Some(ref device) = self.device {
-            if let Ok(em100) = device.lock() {
+            if let Ok(mut em100) = device.lock() {
                 // Stop emulation before writing to memory
-                let _ = em100.set_state(false);
+                let _ = block_on(em100.set_state(false));
                 self.is_running = false;
                 self.progress = 0.0;
                 self.progress_message = "Uploading to device...".to_string();
-                write_sdram_with_progress(&em100, &data, start_addr, None)
+                block_on(write_sdram_with_progress(
+                    &mut em100, &data, start_addr, None,
+                ))
             } else {
                 return;
             }
@@ -313,10 +317,10 @@ impl Em100App {
             .unwrap_or(0x4000000);
 
         let result = if let Some(ref device) = self.device {
-            if let Ok(em100) = device.lock() {
+            if let Ok(mut em100) = device.lock() {
                 self.progress = 0.0;
                 self.progress_message = "Downloading from device...".to_string();
-                read_sdram_with_progress(&em100, 0, size, None)
+                block_on(read_sdram_with_progress(&mut em100, 0, size, None))
             } else {
                 return;
             }
@@ -339,8 +343,8 @@ impl Em100App {
     /// Refresh debug info
     fn refresh_debug_info(&mut self) {
         let result = if let Some(ref device) = self.device {
-            if let Ok(em100) = device.lock() {
-                em100.get_debug_info()
+            if let Ok(mut em100) = device.lock() {
+                block_on(em100.get_debug_info())
             } else {
                 return;
             }
@@ -519,11 +523,11 @@ impl Em100App {
                         });
                     });
                     if requested_mode != self.address_mode {
-                        let result = self
-                            .device
-                            .as_ref()
-                            .and_then(|device| device.lock().ok())
-                            .map(|em100| em100.set_address_mode(requested_mode));
+                        let result = self.device.as_ref().and_then(|device| {
+                            device.lock().ok().map(|mut em100| {
+                                block_on(em100.set_address_mode(requested_mode))
+                            })
+                        });
                         match result {
                             Some(Ok(())) => self.address_mode = requested_mode,
                             Some(Err(error)) => {
@@ -792,7 +796,9 @@ impl Em100App {
             let reset_result = device
                 .lock()
                 .map_err(|_| "Device lock poisoned".to_string())
-                .and_then(|em100| trace::reset_spi_trace(&em100).map_err(|e| e.to_string()));
+                .and_then(|mut em100| {
+                    block_on(trace::reset_spi_trace(&mut em100)).map_err(|e| e.to_string())
+                });
             if let Err(error) = reset_result {
                 let _ = sender.send(Err(error));
                 worker_running.store(false, Ordering::Relaxed);
@@ -805,12 +811,19 @@ impl Em100App {
                 let result = device
                     .lock()
                     .map_err(|_| "Device lock poisoned".to_string())
-                    .and_then(|em100| {
-                        trace::read_spi_trace_output(&em100, &mut decoder, address_offset)
-                            .map_err(|e| e.to_string())
+                    .and_then(|mut em100| {
+                        block_on(trace::read_spi_trace_output(
+                            &mut em100,
+                            &mut decoder,
+                            address_offset,
+                        ))
+                        .map_err(|e| e.to_string())
                     });
                 match result {
-                    Ok(output) if output.is_empty() => {}
+                    Ok(output) if output.is_empty() => {
+                        // Idle bus: back off instead of spinning on the device.
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
                     Ok(output) => match sender.try_send(Ok(output)) {
                         Ok(()) | Err(TrySendError::Full(_)) => {}
                         Err(TrySendError::Disconnected(_)) => break,
@@ -821,8 +834,8 @@ impl Em100App {
                     }
                 }
             }
-            if let Ok(em100) = device.lock() {
-                let _ = trace::reset_spi_trace(&em100);
+            if let Ok(mut em100) = device.lock() {
+                let _ = block_on(trace::reset_spi_trace(&mut em100));
             }
             worker_running.store(false, Ordering::Relaxed);
             active_flag.store(false, Ordering::Release);
