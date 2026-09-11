@@ -59,6 +59,14 @@ struct Args {
     #[arg(long = "reset")]
     reset: Option<u32>,
 
+    /// Check the emulated memory is erased
+    #[arg(long = "blank-check")]
+    blank_check: bool,
+
+    /// Show a checksum of the emulated memory
+    #[arg(long = "checksum")]
+    checksum: bool,
+
     /// Start emulation
     #[arg(short = 'r', long = "start")]
     start: bool,
@@ -630,6 +638,32 @@ async fn run(args: Args) {
             }
         }
     }
+
+    // Deliberately ordered after downloading, unlike em100: a single
+    // invocation verifies the image just written instead of the old
+    // contents. The erase-then-confirm workflow needs separate runs.
+    if args.blank_check {
+        let length = session
+            .device_mut()
+            .emulation_size(chip.as_ref(), chip_db.as_ref())
+            .await;
+        if let Err(e) = session.device_mut().blank_check(length).await {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    if args.checksum {
+        let length = session
+            .device_mut()
+            .emulation_size(chip.as_ref(), chip_db.as_ref())
+            .await;
+        if let Err(e) = session.device_mut().checksum(length).await {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+
     // The Windows tool resets the target before starting emulation
     if let Some(ms) = args.reset {
         if !(1..=10000).contains(&ms) {

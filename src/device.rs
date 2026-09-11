@@ -336,6 +336,38 @@ impl Em100 {
         Ok(())
     }
 
+    /// Check whether `length` bytes of emulated memory are blank (all 0xff).
+    ///
+    /// The EM100 has no blank-check command of its own, so the whole
+    /// emulation buffer is read over USB and checked on the host, as the
+    /// Windows software does.
+    pub async fn blank_check(&mut self, length: usize) -> Result<()> {
+        let data = self.upload(0, length).await.map_err(|_| {
+            Error::OperationFailed("Couldn't read the emulated memory.".to_string())
+        })?;
+        if let Some(offset) = data.iter().position(|&b| b != 0xff) {
+            return Err(Error::OperationFailed(format!(
+                "Blank check failed: found 0x{:02x} at 0x{:x}",
+                data[offset], offset
+            )));
+        }
+        println!("Blank check passed");
+        Ok(())
+    }
+
+    /// Show a checksum of `length` bytes of emulated memory.
+    ///
+    /// A plain 32-bit sum of the bytes, matching the Windows software. Like
+    /// the blank check, the memory is read over USB and added up on the host.
+    pub async fn checksum(&mut self, length: usize) -> Result<()> {
+        let data = self.upload(0, length).await.map_err(|_| {
+            Error::OperationFailed("Couldn't read the emulated memory.".to_string())
+        })?;
+        let sum = data.iter().fold(0u32, |acc, &b| acc.wrapping_add(b as u32));
+        println!("Checksum: 0x{:08x}", sum);
+        Ok(())
+    }
+
     /// Identify the currently emulated flash chip.
     ///
     /// Reads the vendor and device IDs from the FPGA and matches them
