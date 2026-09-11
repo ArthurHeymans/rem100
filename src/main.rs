@@ -5,11 +5,12 @@
 
 use clap::Parser;
 use em100::chips::ChipDatabase;
-use em100::device::{Em100, HoldPinState, list_devices};
+use em100::device::{Em100, HoldPinState};
 use em100::download::update_all_files;
 use em100::firmware::{firmware_dump, firmware_update};
 use em100::image::autocorrect_image;
 use em100::trace::{self, TraceState};
+use futures_lite::future::block_on;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -129,6 +130,11 @@ struct Args {
     debug: bool,
 }
 
+/// Parse a number with optional 0x hex prefix, else decimal.
+///
+/// Deliberately broader than em100, which scans addresses with %x (bare
+/// values are hex there): switching would reinterpret existing rem100
+/// scripts, so 0x-prefixed values stay hex and the rest stay decimal.
 fn parse_hex(s: &str) -> Option<u64> {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
@@ -162,7 +168,7 @@ fn main() {
 
     // Handle --list-devices
     if args.list_devices {
-        match list_devices() {
+        match block_on(Em100::list_devices()) {
             Ok(devices) => {
                 if devices.is_empty() {
                     println!("No EM100pro devices found.");
@@ -197,7 +203,7 @@ fn main() {
         .unwrap_or((None, None, None));
 
     // Open device
-    let mut em100 = match Em100::open(bus, device, serial) {
+    let mut em100 = match block_on(Em100::open(bus, device, serial)) {
         Ok(em100) => em100,
         Err(e) => {
             eprintln!("Error: {}", e);
@@ -249,7 +255,7 @@ fn main() {
     }
 
     // Print current state
-    match em100.get_state() {
+    match block_on(em100.get_state()) {
         Ok(running) => println!(
             "EM100Pro currently {}",
             if running { "running" } else { "stopped" }
@@ -257,21 +263,21 @@ fn main() {
         Err(_) => println!("EM100Pro state unknown"),
     }
 
-    if let Ok(state) = em100.get_hold_pin_state() {
+    if let Ok(state) = block_on(em100.get_hold_pin_state()) {
         println!("EM100Pro hold pin currently {}", state)
     }
     println!();
 
     // Debug mode
     if args.debug {
-        if let Err(e) = em100.debug() {
+        if let Err(e) = block_on(em100.debug()) {
             eprintln!("Debug error: {}", e);
         }
     }
 
     // Firmware update
     if let Some(firmware_in) = &args.firmware_update {
-        if let Err(e) = firmware_update(&em100, firmware_in, args.verify) {
+        if let Err(e) = block_on(firmware_update(&mut em100, firmware_in, args.verify)) {
             eprintln!("Firmware update error: {}", e);
             std::process::exit(1);
         }
@@ -280,7 +286,7 @@ fn main() {
 
     // Firmware dump
     if let Some(firmware_out) = &args.firmware_dump {
-        if let Err(e) = firmware_dump(&em100, firmware_out, false) {
+        if let Err(e) = block_on(firmware_dump(&mut em100, firmware_out, false)) {
             eprintln!("Firmware dump error: {}", e);
             std::process::exit(1);
         }
@@ -289,7 +295,7 @@ fn main() {
 
     // Firmware write (DPFW format)
     if let Some(firmware_out) = &args.firmware_write {
-        if let Err(e) = firmware_dump(&em100, firmware_out, true) {
+        if let Err(e) = block_on(firmware_dump(&mut em100, firmware_out, true)) {
             eprintln!("Firmware write error: {}", e);
             std::process::exit(1);
         }
@@ -304,7 +310,7 @@ fn main() {
         }
         match s.parse::<u32>() {
             Ok(serial) => {
-                if let Err(e) = em100.set_serial_no(serial) {
+                if let Err(e) = block_on(em100.set_serial_no(serial)) {
                     eprintln!("Error setting serial number: {}", e);
                     std::process::exit(1);
                 }
@@ -319,7 +325,7 @@ fn main() {
 
     // Stop emulation
     if args.stop {
-        if let Err(e) = em100.set_state(false) {
+        if let Err(e) = block_on(em100.set_state(false)) {
             eprintln!("Error stopping emulation: {}", e);
         } else {
             println!("Stopped EM100Pro");
@@ -329,7 +335,7 @@ fn main() {
     // Set chip type
     if let Some(chip) = &chip {
         println!("Configuring SPI flash chip emulation.");
-        if let Err(e) = em100.set_chip_type(chip) {
+        if let Err(e) = block_on(em100.set_chip_type(chip)) {
             eprintln!("Failed configuring chip type: {}", e);
             std::process::exit(1);
         }
@@ -338,7 +344,7 @@ fn main() {
 
     // Set address mode
     if let Some(mode) = args.address_mode {
-        if let Err(e) = em100.set_address_mode(mode) {
+        if let Err(e) = block_on(em100.set_address_mode(mode)) {
             eprintln!("Error: {}", e);
             std::process::exit(1);
         }
@@ -361,7 +367,7 @@ fn main() {
 
         if args.debug {
             println!("Setting anyways on your own risk (debug mode enabled)");
-            if em100.set_fpga_voltage(voltage_code).is_err() {
+            if block_on(em100.set_fpga_voltage(voltage_code)).is_err() {
                 eprintln!("Failed configuring FPGA voltage.");
                 std::process::exit(1);
             }
@@ -372,7 +378,7 @@ fn main() {
     if let Some(holdpin) = &args.holdpin {
         match holdpin.parse::<HoldPinState>() {
             Ok(state) => {
-                if let Err(e) = em100.set_hold_pin_state(state) {
+                if let Err(e) = block_on(em100.set_hold_pin_state(state)) {
                     eprintln!("Failed configuring hold pin state: {}", e);
                     std::process::exit(1);
                 }
@@ -389,7 +395,7 @@ fn main() {
     if let Some(upload_file) = &args.upload {
         let maxlen = chip.as_ref().map(|c| c.size as usize).unwrap_or(0x4000000);
 
-        match em100.upload(0, maxlen) {
+        match block_on(em100.upload(0, maxlen)) {
             Ok(data) => {
                 let mut file = match File::create(upload_file) {
                     Ok(f) => f,
@@ -424,7 +430,15 @@ fn main() {
 
         let maxlen = chip.as_ref().map(|c| c.size as usize).unwrap_or(0x4000000);
 
-        let mut file = match File::open(download_file) {
+        if (spi_start_address as usize) > maxlen {
+            eprintln!(
+                "FATAL: start address 0x{:08x} is beyond the {} byte emulation buffer.",
+                spi_start_address, maxlen
+            );
+            std::process::exit(1);
+        }
+
+        let file = match File::open(download_file) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("Can't open file '{}': {}", download_file, e);
@@ -432,8 +446,11 @@ fn main() {
             }
         };
 
+        // Read at most one byte past the chip size: enough to detect an
+        // oversized image (C stops reading at maxlen) without
+        // allocating unboundedly for huge files.
         let mut data = Vec::new();
-        if let Err(e) = file.read_to_end(&mut data) {
+        if let Err(e) = file.take(maxlen as u64 + 1).read_to_end(&mut data) {
             eprintln!("Error reading file: {}", e);
             std::process::exit(1);
         }
@@ -469,16 +486,24 @@ fn main() {
         // Handle start address
         if spi_start_address != 0 {
             // Read existing data and merge
-            match em100.upload(0, maxlen) {
+            match block_on(em100.upload(0, maxlen)) {
                 Ok(mut existing) => {
                     let start = spi_start_address as usize;
                     let end = start + data.len();
                     if end <= existing.len() {
                         existing[start..end].copy_from_slice(&data);
-                        if let Err(e) = em100.download(&existing, 0) {
+                        if let Err(e) = block_on(em100.download(&existing, 0)) {
                             eprintln!("Download error: {}", e);
                             std::process::exit(1);
                         }
+                    } else {
+                        eprintln!(
+                            "FATAL: image does not fit: start address 0x{:08x} plus file size {} exceeds the {} byte emulation buffer.",
+                            spi_start_address,
+                            data.len(),
+                            existing.len()
+                        );
+                        std::process::exit(1);
                     }
                 }
                 Err(e) => {
@@ -486,14 +511,14 @@ fn main() {
                     std::process::exit(1);
                 }
             }
-        } else if let Err(e) = em100.download(&data, 0) {
+        } else if let Err(e) = block_on(em100.download(&data, 0)) {
             eprintln!("Download error: {}", e);
             std::process::exit(1);
         }
 
         // Verify
         if args.verify {
-            match em100.upload(spi_start_address, data.len()) {
+            match block_on(em100.upload(spi_start_address, data.len())) {
                 Ok(readback) => {
                     if readback == data {
                         println!("Verify: PASS");
@@ -509,10 +534,9 @@ fn main() {
             }
         }
     }
-
     // Start emulation
     if args.start {
-        if let Err(e) = em100.set_state(true) {
+        if let Err(e) = block_on(em100.set_state(true)) {
             eprintln!("Error starting emulation: {}", e);
         } else {
             println!("Started EM100Pro");
@@ -523,28 +547,42 @@ fn main() {
     if args.trace || args.terminal || args.traceconsole {
         const MAX_USB_ERRORS: u32 = 10;
 
-        // Set hold pin to input if not explicitly set
+        // Let the target drive the hold pin while tracing, but only if it is
+        // floating, meaning nothing has asked for a particular state. Any
+        // other state was set deliberately, and boards with their own flash
+        // chip on the bus need it held low throughout, or they do not boot.
+        let mut released_hold_pin = false;
         if args.holdpin.is_none() {
-            if let Err(e) = em100.set_hold_pin_state(HoldPinState::Input) {
-                eprintln!("Error: Failed to set EM100 to input: {}", e);
-                std::process::exit(1);
+            match block_on(em100.get_hold_pin_state()) {
+                Ok(HoldPinState::Float) => {
+                    if let Err(e) = block_on(em100.set_hold_pin_state(HoldPinState::Input)) {
+                        eprintln!("Error: Failed to set EM100 to input: {}", e);
+                        std::process::exit(1);
+                    }
+                    released_hold_pin = true;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("Error: Failed to read the hold pin state: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
 
         // Start emulation if not explicitly started or stopped
         if !args.start && !args.stop {
-            em100.set_state(true).ok();
+            block_on(em100.set_state(true)).ok();
         }
 
         print!("Starting ");
 
         if args.trace || args.traceconsole {
-            trace::reset_spi_trace(&em100).ok();
+            block_on(trace::reset_spi_trace(&mut em100)).ok();
             print!("trace{}", if args.terminal { " & " } else { "" });
         }
 
         if args.terminal {
-            trace::init_spi_terminal(&em100).ok();
+            block_on(trace::init_spi_terminal(&mut em100)).ok();
             print!("terminal");
         }
 
@@ -560,20 +598,26 @@ fn main() {
         let address_length = args.length.as_ref().and_then(|s| parse_hex(s)).unwrap_or(0);
 
         let mut trace_state = TraceState::new(args.brief, args.address_mode.unwrap_or(3));
+
         let mut usb_errors = 0u32;
 
         while !exit_requested.load(Ordering::SeqCst) && usb_errors < MAX_USB_ERRORS {
             let ret = if args.traceconsole {
-                trace::read_spi_trace_console(
-                    &em100,
+                block_on(trace::read_spi_trace_console(
+                    &mut em100,
                     &mut trace_state,
                     address_offset,
                     address_length,
-                )
+                ))
             } else if args.trace {
-                trace::read_spi_trace(&em100, &mut trace_state, args.terminal, address_offset)
+                block_on(trace::read_spi_trace(
+                    &mut em100,
+                    &mut trace_state,
+                    args.terminal,
+                    address_offset,
+                ))
             } else if args.terminal {
-                trace::read_spi_terminal(&em100, false)
+                block_on(trace::read_spi_terminal(&mut em100, false))
             } else {
                 Ok(true)
             };
@@ -591,16 +635,16 @@ fn main() {
 
         // Stop emulation if not explicitly started or stopped
         if !args.start && !args.stop {
-            em100.set_state(false).ok();
+            block_on(em100.set_state(false)).ok();
         }
 
         if args.trace {
-            trace::reset_spi_trace(&em100).ok();
+            block_on(trace::reset_spi_trace(&mut em100)).ok();
         }
 
-        // Reset hold pin to float
-        if args.holdpin.is_none() {
-            if let Err(e) = em100.set_hold_pin_state(HoldPinState::Float) {
+        // Put the hold pin back only if it was taken over above
+        if released_hold_pin {
+            if let Err(e) = block_on(em100.set_hold_pin_state(HoldPinState::Float)) {
                 eprintln!("Error: Failed to set EM100 to float: {}", e);
             }
         }

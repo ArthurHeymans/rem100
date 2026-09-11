@@ -30,8 +30,11 @@ fn put_le32(data: &mut [u8], val: u32) {
 pub type FirmwareProgressCallback<'a> = Option<&'a mut dyn FnMut(usize, usize, &str)>;
 
 /// Read firmware from device into memory
-pub fn firmware_read(em100: &Em100, mut progress: FirmwareProgressCallback) -> Result<Vec<u8>> {
-    let id = spi::get_spi_flash_id(em100)?;
+pub async fn firmware_read(
+    em100: &mut Em100,
+    mut progress: FirmwareProgressCallback<'_>,
+) -> Result<Vec<u8>> {
+    let id = spi::get_spi_flash_id(em100).await?;
     let rom_size = match id {
         0x202015 => 2 * MB,  // M25P16
         0xc27518 => 16 * MB, // MX77L12850F
@@ -48,7 +51,10 @@ pub fn firmware_read(em100: &Em100, mut progress: FirmwareProgressCallback) -> R
     for i in (0..rom_size).step_by(256) {
         // Retry up to 3 times
         for retry in 0..3 {
-            if spi::read_spi_flash_page(em100, i as u32, &mut data[i..i + 256]).is_ok() {
+            if spi::read_spi_flash_page(em100, i as u32, &mut data[i..i + 256])
+                .await
+                .is_ok()
+            {
                 break;
             }
             if retry == 2 {
@@ -131,8 +137,12 @@ pub fn firmware_to_dpfw(em100: &Em100, data: &[u8]) -> Result<Vec<u8>> {
 
 /// Dump firmware from device to file (CLI version)
 #[cfg(feature = "cli")]
-pub fn firmware_dump(em100: &Em100, filename: &str, firmware_is_dpfw: bool) -> Result<()> {
-    let id = spi::get_spi_flash_id(em100)?;
+pub async fn firmware_dump(
+    em100: &mut Em100,
+    filename: &str,
+    firmware_is_dpfw: bool,
+) -> Result<()> {
+    let id = spi::get_spi_flash_id(em100).await?;
     let rom_size = match id {
         0x202015 => 2 * MB,
         0xc27518 => 16 * MB,
@@ -161,7 +171,8 @@ pub fn firmware_dump(em100: &Em100, filename: &str, firmware_is_dpfw: bool) -> R
                 pb.set_position(pos as u64);
             }
         }),
-    )?;
+    )
+    .await?;
     pb.finish();
 
     let mut file = File::create(filename)?;
@@ -238,25 +249,25 @@ pub fn validate_firmware(em100: &Em100, fw: &[u8]) -> Result<FirmwareInfo> {
 }
 
 /// Write firmware to device (core function)
-pub fn firmware_write(
-    em100: &Em100,
+pub async fn firmware_write(
+    em100: &mut Em100,
     fw: &[u8],
     info: &FirmwareInfo,
     verify: bool,
-    mut progress: FirmwareProgressCallback,
+    mut progress: FirmwareProgressCallback<'_>,
 ) -> Result<()> {
     // Unlock and erase
-    spi::unlock_spi_flash(em100)?;
-    spi::get_spi_flash_id(em100)?;
+    spi::unlock_spi_flash(em100).await?;
+    spi::get_spi_flash_id(em100).await?;
 
     for i in 0..=0x1e {
-        spi::erase_spi_flash_sector(em100, i as u8)?;
+        spi::erase_spi_flash_sector(em100, i as u8).await?;
         if let Some(ref mut cb) = progress {
             cb(i as usize + 1, 0x1f, "Erasing");
         }
     }
 
-    spi::get_spi_flash_id(em100)?;
+    spi::get_spi_flash_id(em100).await?;
 
     let total_len = info.fpga_len + info.mcu_len;
     let mut written = 0;
@@ -268,7 +279,7 @@ pub fn firmware_write(
         let chunk_len = (info.fpga_len - i).min(256);
         page[..chunk_len]
             .copy_from_slice(&fw[info.fpga_offset + i..info.fpga_offset + i + chunk_len]);
-        spi::write_spi_flash_page(em100, i as u32, &page)?;
+        spi::write_spi_flash_page(em100, i as u32, &page).await?;
         written += chunk_len;
         if let Some(ref mut cb) = progress {
             cb(written, total_len, "Writing");
@@ -281,7 +292,7 @@ pub fn firmware_write(
         let chunk_len = (info.mcu_len - i).min(256);
         page[..chunk_len]
             .copy_from_slice(&fw[info.mcu_offset + i..info.mcu_offset + i + chunk_len]);
-        spi::write_spi_flash_page(em100, (i + 0x100100) as u32, &page)?;
+        spi::write_spi_flash_page(em100, (i + 0x100100) as u32, &page).await?;
         written += chunk_len;
         if let Some(ref mut cb) = progress {
             cb(written, total_len, "Writing");
@@ -298,7 +309,7 @@ pub fn firmware_write(
             let chunk_len = (info.fpga_len - i).min(256);
             page[..chunk_len]
                 .copy_from_slice(&fw[info.fpga_offset + i..info.fpga_offset + i + chunk_len]);
-            spi::read_spi_flash_page(em100, i as u32, &mut vpage)?;
+            spi::read_spi_flash_page(em100, i as u32, &mut vpage).await?;
             if page != vpage {
                 return Err(Error::VerificationFailed);
             }
@@ -314,7 +325,7 @@ pub fn firmware_write(
             let chunk_len = (info.mcu_len - i).min(256);
             page[..chunk_len]
                 .copy_from_slice(&fw[info.mcu_offset + i..info.mcu_offset + i + chunk_len]);
-            spi::read_spi_flash_page(em100, (i + 0x100100) as u32, &mut vpage)?;
+            spi::read_spi_flash_page(em100, (i + 0x100100) as u32, &mut vpage).await?;
             if page != vpage {
                 return Err(Error::VerificationFailed);
             }
@@ -335,11 +346,11 @@ pub fn firmware_write(
     page[5] = 0x54; // 'T'
     page[6] = 0x55;
     page[7] = 0xaa;
-    spi::write_spi_flash_page(em100, 0x100000, &page)?;
+    spi::write_spi_flash_page(em100, 0x100000, &page).await?;
 
     if verify {
         let mut vpage = [0u8; 256];
-        spi::read_spi_flash_page(em100, 0x100000, &mut vpage)?;
+        spi::read_spi_flash_page(em100, 0x100000, &mut vpage).await?;
         if page != vpage {
             return Err(Error::VerificationFailed);
         }
@@ -350,7 +361,7 @@ pub fn firmware_write(
 
 /// Update firmware from file (CLI version)
 #[cfg(feature = "cli")]
-pub fn firmware_update(em100: &Em100, filename: &str, verify: bool) -> Result<()> {
+pub async fn firmware_update(em100: &mut Em100, filename: &str, verify: bool) -> Result<()> {
     match em100.hw_version {
         HwVersion::Em100ProEarly | HwVersion::Em100Pro => {
             println!("Detected EM100Pro (original).");
@@ -432,7 +443,8 @@ pub fn firmware_update(em100: &Em100, filename: &str, verify: bool) -> Result<()
             pb.set_message(msg.to_string());
             pb.set_position(pos as u64);
         }),
-    )?;
+    )
+    .await?;
 
     pb.finish_with_message("Complete");
 

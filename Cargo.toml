@@ -47,6 +47,11 @@ poll-promise = { version = "0.3", optional = true, features = ["web"] }
 rfd = { version = "0.17", optional = true, default-features = false, features = ["xdg-portal"] }
 env_logger = { version = "0.11", optional = true }
 
+# Async timer for native USB transfer timeouts (unused on wasm32,
+# where WebUSB cannot cancel transfers anyway).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+futures-timer = "3"
+
 # Web-specific dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # nusb 0.2.6 requires the typed WebUSB bindings from these releases.
