@@ -303,6 +303,16 @@ pub struct TraceState {
     timestamp: u64,
     start_timestamp: u64,
     brief: bool,
+    /// Console mode prints payload of page-program records; set by a 0x02
+    /// record and kept across report batches like the C static.
+    /// Only read by the native-gated console path.
+    #[allow(dead_code)]
+    console_do_write: bool,
+    /// Address type of the command currently being decoded. Set once per
+    /// command header and reused for continuation records, whose payload
+    /// bytes sit where the opcode was: re-decoding per record (as was
+    /// done) mislabels multi-record commands, unlike the C static.
+    cur_addr_type: AddressType,
 }
 
 /// A decoded trace event. Output fragments preserve the CLI's streaming format.
@@ -340,6 +350,8 @@ impl Default for TraceState {
             timestamp: 0,
             start_timestamp: 0,
             brief: false,
+            console_do_write: false,
+            cur_addr_type: AddressType::None,
         }
     }
 }
@@ -395,7 +407,12 @@ pub fn decode_spi_trace_reports(
             )));
         }
 
-        let count = (((data[0] as usize) << 8) | data[1] as usize).min(1023);
+        let raw_count = ((data[0] as usize) << 8) | (data[1] as usize);
+        #[cfg(not(target_arch = "wasm32"))]
+        if raw_count > 1023 {
+            eprintln!("Warning: EM100pro sends too much data.");
+        }
+        let count = raw_count.min(1023);
         for i in 0..count {
             let mut j = state.additional_pad_bytes;
             state.additional_pad_bytes = 0;
@@ -456,8 +473,14 @@ pub fn decode_spi_trace_reports(
                     j = MAX_TRACE_BLOCKLENGTH;
                 }
 
-                let output = if state.brief {
+                state.cur_addr_type = spi_cmd_vals.address_type;
+
+                if state.brief {
                     state.start_timestamp = 0;
+                } else {
+                    state.counter += 1;
+                }
+                let output = if state.brief {
                     if spi_cmd_vals.address_type != AddressType::None {
                         format!(
                             "0x{spi_command:02x} @ 0x{:08x} ({})\n",
@@ -467,7 +490,6 @@ pub fn decode_spi_trace_reports(
                         format!("0x{spi_command:02x} ({})\n", spi_cmd_vals.name)
                     }
                 } else {
-                    state.counter += 1;
                     let rel_time = state.timestamp.saturating_sub(state.start_timestamp);
                     format!(
                         "\nTime: {:06}.{:08} command # {:<6} : 0x{spi_command:02x} - {}",
@@ -490,12 +512,11 @@ pub fn decode_spi_trace_reports(
                 let payload_start = i * 8 + 4;
                 let blocklen = ((data[2 + i * 8 + 1].wrapping_sub(state.curpos)) / 8) as usize;
                 let blocklen = blocklen.min(data.len() - payload_start);
-                let spi_cmd_vals = get_command_vals(data[i * 8 + 4]);
                 let mut output = String::new();
 
                 while j < blocklen {
                     if state.outbytes == 0 {
-                        match spi_cmd_vals.address_type {
+                        match state.cur_addr_type {
                             AddressType::Dynamic | AddressType::Addr3B | AddressType::Addr4B => {
                                 output
                                     .push_str(&format!("\n{:08x} : ", addr_offset + state.address));
@@ -706,9 +727,11 @@ pub async fn read_spi_trace_console(
         if count == 0 {
             continue;
         }
-        let count = count.min(1023);
-
-        let mut do_write = false;
+        let raw_count = count;
+        if raw_count > 1023 {
+            eprintln!("Warning: EM100pro sends too much data: {}.", raw_count);
+        }
+        let count = raw_count.min(1023);
 
         for i in 0..count {
             let mut j = state.additional_pad_bytes;
@@ -756,11 +779,12 @@ pub async fn read_spi_trace_console(
                 }
 
                 state.curpos = 0;
-                do_write = spi_command == 0x02;
+                state.console_do_write = spi_command == 0x02;
+                state.cur_addr_type = spi_cmd_vals.address_type;
             }
 
-            if !do_write
-                || spi_cmd_vals_address_type(data[i * 8 + 4]) == AddressType::None
+            if !state.console_do_write
+                || state.cur_addr_type == AddressType::None
                 || state.address < addr_offset
                 || state.address > addr_offset + addr_len
             {
@@ -783,11 +807,6 @@ pub async fn read_spi_trace_console(
     }
 
     Ok(true)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn spi_cmd_vals_address_type(cmd: u8) -> AddressType {
-    get_command_vals(cmd).address_type
 }
 
 #[cfg(test)]
@@ -842,6 +861,31 @@ mod tests {
                 "0x03 @ 0x12345678 (read)\n".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn continuation_records_reuse_header_command_type() {
+        // One 0x03 (read) command split over two records. The second
+        // record's opcode slot carries payload (0x05, itself a status
+        // read opcode) instead of the command.
+        let mut report = vec![0; REPORT_BUFFER_LENGTH];
+        report[0..2].copy_from_slice(&[0x00, 0x02]);
+        report[2..10].copy_from_slice(&[1, 0x40, 0x03, 0x12, 0x34, 0x56, 0xAA, 0xBB]);
+        report[10..18].copy_from_slice(&[1, 0xD0, 0x05, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE]);
+
+        let events = decode_spi_trace_reports(&[report], &mut TraceState::default(), 0).unwrap();
+        let output: String = events
+            .into_iter()
+            .filter_map(|event| match event {
+                TraceEvent::Output(output) => Some(output),
+                TraceEvent::Timestamp => None,
+            })
+            .collect();
+
+        // The continuation payload is labeled with the running address,
+        // not as an address-less command.
+        assert!(output.contains("00123466 : "), "output was: {output}");
+        assert!(!output.contains("         : "), "output was: {output}");
     }
 
     #[test]
