@@ -110,6 +110,9 @@ pub mod fpga {
         /// rem100 follows it.
         pub const TERMINAL_CTRL_81: Self = Self(0x81);
         pub const TERMINAL_CTRL_83: Self = Self(0x83);
+        /// Chip identification registers holding the emulated flash IDs.
+        pub const CHIP_DEVID: Self = Self(0x40);
+        pub const CHIP_VENDID: Self = Self(0x42);
         pub const CHIP_CONFIG_C4: Self = Self(0xc4);
         pub const CHIP_CONFIG_10: Self = Self(0x10);
         pub const CHIP_CONFIG_81: Self = Self(0x81);

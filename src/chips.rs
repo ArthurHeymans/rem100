@@ -42,6 +42,20 @@ impl ChipDesc {
     pub fn default_address_mode(&self) -> u8 {
         if self.size > 16 * 1024 * 1024 { 4 } else { 3 }
     }
+
+    /// Find the value written to an FPGA register by the chip's init sequence.
+    ///
+    /// Searches for an FPGA write command (0x23) targeting `reg` and returns
+    /// the big-endian value, or `None` when the sequence never writes it.
+    pub fn init_register_value(&self, reg: u8) -> Option<u16> {
+        self.init.iter().take(self.init_len).find_map(|entry| {
+            if entry[0] == 0x23 && entry[1] == reg {
+                Some(((entry[2] as u16) << 8) | (entry[3] as u16))
+            } else {
+                None
+            }
+        })
+    }
 }
 
 // Dediprog configuration file constants
@@ -353,6 +367,16 @@ pub fn get_em100_file(name: &str) -> Result<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::ChipDesc;
+
+    #[test]
+    fn init_register_value_finds_fpga_writes() {
+        let mut chip = ChipDesc::default();
+        chip.init[0] = [0x23, 0x40, 0x12, 0x34];
+        chip.init[1] = [0x11, 0x04, 0x00, 0x00];
+        chip.init_len = 2;
+        assert_eq!(chip.init_register_value(0x40), Some(0x1234));
+        assert_eq!(chip.init_register_value(0x42), None);
+    }
 
     #[test]
     fn default_address_mode_tracks_capacity_boundary() {

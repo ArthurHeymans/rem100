@@ -481,7 +481,10 @@ async fn run(args: Args) {
 
     // Upload from device
     if let Some(upload_file) = &args.upload {
-        let maxlen = chip.as_ref().map(|c| c.size as usize).unwrap_or(0x4000000);
+        let maxlen = session
+            .device_mut()
+            .emulation_size(chip.as_ref(), chip_db.as_ref())
+            .await;
 
         match read_memory_with_progress(&mut session, 0, maxlen).await {
             Ok(data) => {

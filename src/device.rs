@@ -3,7 +3,7 @@
 //! This is the only device implementation. Native code drives the futures
 //! with futures_lite::future::block_on; browsers await them on the JS loop.
 
-use crate::chips::ChipDesc;
+use crate::chips::{ChipDatabase, ChipDesc};
 use crate::error::{Error, Result};
 use crate::protocol::{chip as chip_command, fpga::Register};
 use crate::system::{self, GetVoltageChannel, LedState};
@@ -315,6 +315,52 @@ impl Em100 {
             | data[2] as u32;
         self.hw_version = HwVersion::from(data[1]);
         Ok(())
+    }
+
+    /// Identify the currently emulated flash chip.
+    ///
+    /// Reads the vendor and device IDs from the FPGA and matches them
+    /// against the init sequences in the chip database. Only the first
+    /// emulated chip is covered: the second-chip register mapping is
+    /// tied to chip selection, which is not ported.
+    pub async fn get_chip_type(&mut self, db: &ChipDatabase) -> Result<ChipDesc> {
+        let venid = crate::fpga::read_fpga_register(self, Register::CHIP_VENDID.address()).await?;
+        let devid = crate::fpga::read_fpga_register(self, Register::CHIP_DEVID.address()).await?;
+        db.chips
+            .iter()
+            .find(|chip| {
+                chip.init_register_value(Register::CHIP_DEVID.address()) == Some(devid)
+                    && chip.init_register_value(Register::CHIP_VENDID.address()) == Some(venid)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                Error::InvalidChip(format!(
+                    "Could not identify emulated chip (venid 0x{:04x}, devid 0x{:04x})",
+                    venid, devid
+                ))
+            })
+    }
+
+    /// Work out how large the emulated chip is.
+    ///
+    /// Returns the selected chip's size when one was given, otherwise asks
+    /// the EM100 what it is currently emulating, falling back to the
+    /// largest size supported (64MB) when that cannot be determined.
+    pub async fn emulation_size(
+        &mut self,
+        selected: Option<&ChipDesc>,
+        db: Option<&ChipDatabase>,
+    ) -> usize {
+        if let Some(chip) = selected {
+            return chip.size as usize;
+        }
+        if let Some(db) = db {
+            if let Ok(emulated) = self.get_chip_type(db).await {
+                println!("Configured to emulate {}kB chip", emulated.size / 1024);
+                return emulated.size as usize;
+            }
+        }
+        0x4000000
     }
 
     /// Start or stop emulation
