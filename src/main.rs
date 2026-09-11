@@ -133,6 +133,10 @@ struct Args {
 }
 
 /// Parse a number with optional 0x hex prefix, else decimal.
+///
+/// Deliberately broader than em100, which scans addresses with %x (bare
+/// values are hex there): switching would reinterpret existing rem100
+/// scripts, so 0x-prefixed values stay hex and the rest stay decimal.
 fn parse_hex(s: &str) -> Option<u64> {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
@@ -488,7 +492,15 @@ async fn run(args: Args) {
 
         let maxlen = chip.as_ref().map(|c| c.size as usize).unwrap_or(0x4000000);
 
-        let mut file = match File::open(download_file) {
+        if (spi_start_address as usize) > maxlen {
+            eprintln!(
+                "FATAL: start address 0x{:08x} is beyond the {} byte emulation buffer.",
+                spi_start_address, maxlen
+            );
+            std::process::exit(1);
+        }
+
+        let file = match File::open(download_file) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("Can't open file '{}': {}", download_file, e);
@@ -496,8 +508,11 @@ async fn run(args: Args) {
             }
         };
 
+        // Read at most one byte past the chip size: enough to detect an
+        // oversized image (C stops reading at maxlen) without
+        // allocating unboundedly for huge files.
         let mut data = Vec::new();
-        if let Err(e) = file.read_to_end(&mut data) {
+        if let Err(e) = file.take(maxlen as u64 + 1).read_to_end(&mut data) {
             eprintln!("Error reading file: {}", e);
             std::process::exit(1);
         }
@@ -544,6 +559,14 @@ async fn run(args: Args) {
                             eprintln!("Download error: {}", e);
                             std::process::exit(1);
                         }
+                    } else {
+                        eprintln!(
+                            "FATAL: image does not fit: start address 0x{:08x} plus file size {} exceeds the {} byte emulation buffer.",
+                            spi_start_address,
+                            data.len(),
+                            existing.len()
+                        );
+                        std::process::exit(1);
                     }
                 }
                 Err(e) => {
