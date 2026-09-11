@@ -67,6 +67,14 @@ struct Args {
     #[arg(long = "checksum")]
     checksum: bool,
 
+    /// Pad a short download image out to the chip size with BYTE
+    #[arg(long = "fill")]
+    fill: Option<String>,
+
+    /// Allow an oversized download image to be truncated
+    #[arg(long = "truncate")]
+    truncate: bool,
+
     /// Start emulation
     #[arg(short = 'r', long = "start")]
     start: bool,
@@ -564,13 +572,33 @@ async fn run(args: Args) {
         }
 
         if data.len() > maxlen {
-            eprintln!("FATAL: file size exceeds maximum");
-            std::process::exit(1);
+            if !args.truncate {
+                println!("Warning: image is larger than the chip");
+            }
+            data.truncate(maxlen);
         }
 
-        // When a chip is specified, validate that file size matches expected size
+        let fill_value = match &args.fill {
+            Some(s) => match parse_hex(s) {
+                Some(v) if v <= 0xff => Some(v as u8),
+                _ => {
+                    eprintln!("Invalid fill byte: {}", s);
+                    std::process::exit(1);
+                }
+            },
+            None => None,
+        };
+
+        // When a chip is specified, pad a short image or validate the size
         if chip.is_some() {
             let expected_size = maxlen - spi_start_address as usize;
+            if let Some(fill) = fill_value {
+                if data.len() < expected_size {
+                    let pad = expected_size - data.len();
+                    println!("Filling the remaining {} bytes with 0x{:02x}", pad, fill);
+                    data.resize(expected_size, fill);
+                }
+            }
             if data.len() != expected_size {
                 eprintln!(
                     "FATAL: file size ({}) does not match chip size minus start address ({}).",
