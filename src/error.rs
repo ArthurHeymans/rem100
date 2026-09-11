@@ -23,6 +23,9 @@ pub enum Error {
     #[error("Device communication failed: {0}")]
     Communication(String),
 
+    #[error("USB transfer timed out")]
+    Timeout,
+
     #[error("Invalid response from device")]
     InvalidResponse,
 

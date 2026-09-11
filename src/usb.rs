@@ -7,18 +7,62 @@ use crate::protocol::Command;
 use nusb::Endpoint;
 use nusb::transfer::{Buffer, Bulk, BulkOrInterrupt, Completion, EndpointDirection, In, Out};
 
+/// Transfer timeout, matching the C tool's BULK_SEND_TIMEOUT (libusb, 5 s).
+///
+/// Timeouts only exist natively: WebUSB exposes no transfer cancellation,
+/// so a stuck browser transfer cannot be recovered anyway (same policy as
+/// nusb-ftdi's wasm backend).
+#[cfg(not(target_arch = "wasm32"))]
+const TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5000);
+
 /// Round up to the next multiple of max packet size for IN transfers
 fn round_up_to_max_packet(len: usize, max_packet_size: usize) -> usize {
     len.div_ceil(max_packet_size) * max_packet_size
 }
 
 /// Wait for the completion of a previously submitted transfer.
+///
+/// Natively the wait is bounded: on timeout the stuck transfer is
+/// cancelled and its completion drained so the endpoint starts clean for
+/// the next operation. On wasm the wait is unbounded (see above).
 async fn await_completion<EpType, Dir>(endpoint: &mut Endpoint<EpType, Dir>) -> Result<Completion>
 where
     EpType: BulkOrInterrupt,
     Dir: EndpointDirection,
 {
-    Ok(endpoint.next_complete().await)
+    #[cfg(target_arch = "wasm32")]
+    {
+        Ok(endpoint.next_complete().await)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use futures_lite::future::race;
+
+        let completion = race(async { Some(endpoint.next_complete().await) }, async {
+            futures_timer::Delay::new(TRANSFER_TIMEOUT).await;
+            None
+        })
+        .await;
+        if let Some(completion) = completion {
+            return Ok(completion);
+        }
+
+        // Leave no transfer behind: cancel the stuck one and drain
+        // completions until the endpoint is clean, exactly like nusb's
+        // transfer_blocking does. The drain is deliberately unbounded: a
+        // stale Cancelled completion consumed as a later operation's
+        // result would silently cross operation buffers, which is worse
+        // than waiting here on the error path. Submits are sequential, so
+        // at most one completion can be outstanding.
+        endpoint.cancel_all();
+        while endpoint.pending() > 0 {
+            // next_complete is cancellation-safe; just wait for the
+            // cancelled completion to come back.
+            let _ = endpoint.next_complete().await;
+        }
+        Err(Error::Timeout)
+    }
 }
 
 /// Send a typed 16-byte command to the EM100 (async).
@@ -101,8 +145,10 @@ pub async fn bulk_read(endpoint_in: &mut Endpoint<Bulk, In>, length: usize) -> R
 
 /// Wait between USB operations where pacing is required.
 ///
-/// Never blocks the thread, so the native GUI stays responsive during
-/// the multi-second FPGA and SPI flash waits; on wasm32 this is a JS timer.
+/// Works with both ways this crate's futures are driven: under
+/// `block_on` the calling thread parks for the duration (like the
+/// `thread::sleep` this replaces), while on wasm32 it is a JS timer that
+/// keeps the browser event loop free.
 pub async fn sleep_ms(ms: u32) {
     futures_timer::Delay::new(std::time::Duration::from_millis(ms as u64)).await;
 }

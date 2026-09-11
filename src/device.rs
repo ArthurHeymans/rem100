@@ -217,8 +217,16 @@ impl Em100 {
         if let (Some(bus), Some(dev)) = (bus, device) {
             return Self::open_by_bus_device(bus, dev).await;
         }
+        // Bus topology is not visible through WebUSB; reject explicit
+        // addressing instead of silently opening the prompted device.
         #[cfg(target_arch = "wasm32")]
-        let _ = (bus, device);
+        if bus.is_some() || device.is_some() {
+            return Err(Error::InvalidArgument(
+                "Opening by USB bus/device is not supported in the browser; \
+                 use the permission prompt or a serial number instead"
+                    .to_string(),
+            ));
+        }
         if let Some(serial) = serial_number {
             Self::open_by_serial(serial).await
         } else {
