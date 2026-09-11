@@ -684,18 +684,22 @@ pub async fn read_spi_terminal(em100: &mut Em100, show_counter: bool) -> Result<
 }
 
 /// Initialize SPI terminal
+///
+/// Replicates the Windows software: select the SPI command carrying terminal
+/// data (FPGA register 0x82), then route terminal data over USB by writing
+/// FPGA registers 0x81 and 0x83. The Windows tool never writes any of the HT
+/// registers here, which is what the old code did, and which received nothing.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn init_spi_terminal(em100: &mut Em100) -> Result<()> {
-    spi::write_ht_register(em100, spi::HtRegister::UfifoDataFmt, 0).await?;
-    spi::write_ht_register(em100, spi::HtRegister::Status, spi::START_SPI_EMULATION).await?;
-
-    // Set EM100 to recognize SPI command 0x11
+    // Tell the EM100 which SPI command carries terminal data
     fpga::write_fpga_register(
         em100,
         Register::SPI_COMMAND.address(),
         EM100_SPECIFIC_CMD as u16,
     )
     .await?;
+    fpga::write_fpga_register(em100, Register::TERMINAL_CTRL_81.address(), 0).await?;
+    fpga::write_fpga_register(em100, Register::TERMINAL_CTRL_83.address(), 0).await?;
     let _ = fpga::read_fpga_register(em100, Register::EMULATION_STATE.address()).await?;
 
     Ok(())
