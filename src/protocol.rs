@@ -110,6 +110,9 @@ pub mod fpga {
         /// rem100 follows it.
         pub const TERMINAL_CTRL_81: Self = Self(0x81);
         pub const TERMINAL_CTRL_83: Self = Self(0x83);
+        /// Target reset line: clearing bit 0 asserts reset, setting it
+        /// releases it again. The pulse width is timed by the host.
+        pub const RESET_LINE: Self = Self(0x10);
         /// Chip identification registers holding the emulated flash IDs.
         pub const CHIP_DEVID: Self = Self(0x40);
         pub const CHIP_VENDID: Self = Self(0x42);

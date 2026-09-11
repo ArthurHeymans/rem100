@@ -317,6 +317,25 @@ impl Em100 {
         Ok(())
     }
 
+    /// Pulse the reset line of the target system for `ms` milliseconds.
+    ///
+    /// Bit 0 of FPGA register 0x10 is the reset line: clearing it asserts
+    /// reset and setting it releases it again. The pulse width is timed by
+    /// the host, as the Windows software does.
+    pub async fn reset_target(&mut self, ms: u32) -> Result<()> {
+        crate::fpga::write_fpga_register(self, Register::RESET_LINE.address(), 0x0e)
+            .await
+            .map_err(|_| Error::OperationFailed("Couldn't assert reset.".to_string()))?;
+
+        usb::sleep_ms(ms).await;
+
+        crate::fpga::write_fpga_register(self, Register::RESET_LINE.address(), 0x0f)
+            .await
+            .map_err(|_| Error::OperationFailed("Couldn't release reset.".to_string()))?;
+
+        Ok(())
+    }
+
     /// Identify the currently emulated flash chip.
     ///
     /// Reads the vendor and device IDs from the FPGA and matches them

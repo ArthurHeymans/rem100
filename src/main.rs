@@ -55,6 +55,10 @@ struct Args {
     #[arg(short = 'u', long = "upload")]
     upload: Option<String>,
 
+    /// Pulse the target reset line for MS milliseconds
+    #[arg(long = "reset")]
+    reset: Option<u32>,
+
     /// Start emulation
     #[arg(short = 'r', long = "start")]
     start: bool,
@@ -625,6 +629,18 @@ async fn run(args: Args) {
                 }
             }
         }
+    }
+    // The Windows tool resets the target before starting emulation
+    if let Some(ms) = args.reset {
+        if !(1..=10000).contains(&ms) {
+            eprintln!("Reset time must be between 1 and 10000 ms");
+            std::process::exit(1);
+        }
+        if let Err(e) = session.device_mut().reset_target(ms).await {
+            eprintln!("Error: Failed to reset the target: {}", e);
+            std::process::exit(1);
+        }
+        println!("Pulsed the target reset line for {} ms", ms);
     }
 
     // Start emulation
