@@ -302,7 +302,7 @@ mod wasm_app {
                 };
 
                 let (result, device) = if let Some(mut dev) = device {
-                    let res = dev.set_address_mode(mode).await;
+                    let res = dev.set_address_mode(mode, false).await;
                     (Some(res), Some(dev))
                 } else {
                     (None, None)

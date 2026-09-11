@@ -45,6 +45,10 @@ struct Args {
     #[arg(short = 'm', long = "address-mode")]
     address_mode: Option<u8>,
 
+    /// Allow the target to enter 4-byte address mode (on|off)
+    #[arg(long = "enter-4byte-mode")]
+    enter_4byte_mode: Option<String>,
+
     /// Upload from EM100pro into FILE
     #[arg(short = 'u', long = "upload")]
     upload: Option<String>,
@@ -342,13 +346,45 @@ fn main() {
         println!("Chip set to {} {}.", chip.vendor, chip.name);
     }
 
-    // Set address mode
-    if let Some(mode) = args.address_mode {
-        if let Err(e) = block_on(em100.set_address_mode(mode)) {
+    // Work out the address mode. -m forces it; otherwise a chip larger than
+    // 16MB is switched to 4-byte mode automatically. The register is only
+    // written when there is a reason to.
+    let mut address_mode = args.address_mode.unwrap_or(3);
+    let mut set_address = args.address_mode.is_some();
+    let mut enter_4byte = false;
+    let mut set_enter_4byte = false;
+    if let Some(enter) = &args.enter_4byte_mode {
+        match enter.to_lowercase().as_str() {
+            "on" => {
+                enter_4byte = true;
+                set_enter_4byte = true;
+            }
+            "off" => {
+                set_enter_4byte = true;
+            }
+            _ => {
+                eprintln!("Invalid 4 byte mode entry: {}", enter);
+                std::process::exit(1);
+            }
+        }
+    }
+    if !set_address {
+        if let Some(chip) = &chip {
+            if chip.size > 16 * 1024 * 1024 {
+                address_mode = 4;
+                set_address = true;
+            }
+        }
+    }
+    if set_address || set_enter_4byte {
+        if let Err(e) = block_on(em100.set_address_mode(address_mode, enter_4byte)) {
             eprintln!("Error: {}", e);
             std::process::exit(1);
         }
-        println!("Enabled {} byte address mode", mode);
+        println!("Enabled {} byte address mode", address_mode);
+        if enter_4byte {
+            println!("Enabled entry into 4 byte address mode");
+        }
     }
 
     // Set voltage (obsolete)
@@ -597,7 +633,7 @@ fn main() {
 
         let address_length = args.length.as_ref().and_then(|s| parse_hex(s)).unwrap_or(0);
 
-        let mut trace_state = TraceState::new(args.brief, args.address_mode.unwrap_or(3));
+        let mut trace_state = TraceState::new(args.brief, address_mode);
 
         let mut usb_errors = 0u32;
 

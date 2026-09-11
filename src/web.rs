@@ -237,8 +237,9 @@ impl Em100App {
             if let Ok(mut em100) = device.lock() {
                 // Stop emulation before changing chip type (matches CLI --stop --set pattern)
                 let _ = block_on(em100.set_state(false));
-                block_on(em100.set_chip_type(&chip))
-                    .and_then(|_| block_on(em100.set_address_mode(chip.default_address_mode())))
+                block_on(em100.set_chip_type(&chip)).and_then(|_| {
+                    block_on(em100.set_address_mode(chip.default_address_mode(), false))
+                })
             } else {
                 return;
             }
@@ -529,7 +530,7 @@ impl Em100App {
                     if requested_mode != self.address_mode {
                         let result = self.device.as_ref().and_then(|device| {
                             device.lock().ok().map(|mut em100| {
-                                block_on(em100.set_address_mode(requested_mode))
+                                block_on(em100.set_address_mode(requested_mode, false))
                             })
                         });
                         match result {
