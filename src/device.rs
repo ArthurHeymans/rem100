@@ -351,19 +351,19 @@ impl Em100 {
     }
 
     /// Set address mode (3 or 4 byte)
-    pub async fn set_address_mode(&mut self, mode: u8) -> Result<()> {
+    ///
+    /// `enter_4byte` allows the emulated chip to enter 4-byte addressing in
+    /// response to a target command (bit 4 of FPGA register 0x4f, sharing
+    /// the register with the default address length in bit 0).
+    pub async fn set_address_mode(&mut self, mode: u8, enter_4byte: bool) -> Result<()> {
         if mode != 3 && mode != 4 {
             return Err(Error::InvalidArgument(format!(
                 "Invalid address mode: {}",
                 mode
             )));
         }
-        crate::fpga::write_fpga_register(
-            self,
-            Register::ADDRESS_MODE.address(),
-            if mode == 4 { 1 } else { 0 },
-        )
-        .await?;
+        let value = (if mode == 4 { 1 } else { 0 }) | (u16::from(enter_4byte) << 4);
+        crate::fpga::write_fpga_register(self, Register::ADDRESS_MODE.address(), value).await?;
         Ok(())
     }
 
@@ -461,7 +461,8 @@ impl Em100 {
         // from a large chip back to a 3-byte-addressed chip. em100 never
         // writes the address register here; rem100 does so deliberately
         // instead of leaving a stale 4-byte mode behind.
-        self.set_address_mode(chip.default_address_mode()).await?;
+        self.set_address_mode(chip.default_address_mode(), false)
+            .await?;
 
         Ok(())
     }

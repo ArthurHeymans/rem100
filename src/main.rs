@@ -47,6 +47,10 @@ struct Args {
     #[arg(short = 'm', long = "address-mode")]
     address_mode: Option<u8>,
 
+    /// Allow the target to enter 4-byte address mode (on|off)
+    #[arg(long = "enter-4byte-mode")]
+    enter_4byte_mode: Option<String>,
+
     /// Upload from EM100pro into FILE
     #[arg(short = 'u', long = "upload")]
     upload: Option<String>,
@@ -399,13 +403,35 @@ async fn run(args: Args) {
         println!("Chip set to {} {}.", chip.vendor, chip.name);
     }
 
-    // Set address mode
-    if let Some(mode) = args.address_mode {
-        if let Err(e) = session.set_address_mode(mode).await {
+    // Work out the address mode. -m forces it; otherwise a chip larger than
+    // 16MB is switched to 4-byte mode automatically. The register is only
+    // written when there is a reason to.
+    let enter_4byte: Option<bool> = match &args.enter_4byte_mode {
+        None => None,
+        Some(enter) => match enter.to_lowercase().as_str() {
+            "on" => Some(true),
+            "off" => Some(false),
+            _ => {
+                eprintln!("Invalid 4 byte mode entry: {}", enter);
+                std::process::exit(1);
+            }
+        },
+    };
+    let auto_4byte =
+        args.address_mode.is_none() && chip.as_ref().is_some_and(|c| c.size > 16 * 1024 * 1024);
+    let address_mode = args.address_mode.unwrap_or(if auto_4byte { 4 } else { 3 });
+    if args.address_mode.is_some() || enter_4byte.is_some() || auto_4byte {
+        if let Err(e) = session
+            .set_address_mode(address_mode, enter_4byte.unwrap_or(false))
+            .await
+        {
             eprintln!("Error: {}", e);
             std::process::exit(1);
         }
-        println!("Enabled {} byte address mode", mode);
+        println!("Enabled {} byte address mode", address_mode);
+        if enter_4byte == Some(true) {
+            println!("Enabled entry into 4 byte address mode");
+        }
     }
 
     // Set voltage (obsolete)
