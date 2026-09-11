@@ -62,7 +62,7 @@ pub async fn fpga_set_voltage(em100: &mut Em100, voltage_code: u8) -> Result<()>
 }
 
 /// Get FPGA voltage code from current state
-pub async fn fpga_get_voltage(em100: &Em100) -> Result<u8> {
+pub fn fpga_get_voltage(em100: &Em100) -> Result<u8> {
     // The voltage is encoded in the FPGA version's high bit
     Ok(if em100.fpga & 0x8000 != 0 { 18 } else { 33 })
 }

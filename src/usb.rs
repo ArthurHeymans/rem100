@@ -145,8 +145,10 @@ pub async fn bulk_read(endpoint_in: &mut Endpoint<Bulk, In>, length: usize) -> R
 
 /// Wait between USB operations where pacing is required.
 ///
-/// Never blocks the thread, so the native GUI stays responsive during
-/// the multi-second FPGA and SPI flash waits; on wasm32 this is a JS timer.
+/// Works with both ways this crate's futures are driven: under
+/// `block_on` the calling thread parks for the duration (like the
+/// `thread::sleep` this replaces), while on wasm32 it is a JS timer that
+/// keeps the browser event loop free.
 pub async fn sleep_ms(ms: u32) {
     futures_timer::Delay::new(std::time::Duration::from_millis(ms as u64)).await;
 }
