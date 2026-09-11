@@ -303,6 +303,15 @@ pub struct TraceState {
     timestamp: u64,
     start_timestamp: u64,
     brief: bool,
+    /// Show only these SPI commands when set
+    cmd_filter: [bool; 256],
+    have_cmd_filter: bool,
+    /// Show only accesses within this address range when set
+    addr_start: u64,
+    addr_end: u64,
+    have_addr_filter: bool,
+    /// The current command is decoded for bookkeeping but not printed
+    skipping: bool,
     /// Console mode prints payload of page-program records; set by a 0x02
     /// record and kept across report batches like the C static.
     /// Only read by the native-gated console path.
@@ -350,6 +359,12 @@ impl Default for TraceState {
             timestamp: 0,
             start_timestamp: 0,
             brief: false,
+            cmd_filter: [false; 256],
+            have_cmd_filter: false,
+            addr_start: 0,
+            addr_end: 0,
+            have_addr_filter: false,
+            skipping: false,
             console_do_write: false,
             cur_addr_type: AddressType::None,
         }
@@ -363,6 +378,38 @@ impl TraceState {
             address_mode,
             ..Default::default()
         }
+    }
+
+    /// Only show these SPI commands in the trace output.
+    ///
+    /// Filtering happens on the host: the EM100 captures everything and
+    /// non-matching commands are still decoded, so address and length
+    /// bookkeeping stays correct; they are simply not printed.
+    pub fn filter_command(&mut self, cmd: u8) {
+        self.cmd_filter[cmd as usize] = true;
+        self.have_cmd_filter = true;
+    }
+
+    /// Only show accesses with an address in `start..=end`.
+    pub fn filter_address(&mut self, start: u64, end: u64) {
+        self.addr_start = start;
+        self.addr_end = end;
+        self.have_addr_filter = true;
+    }
+
+    fn shows(&self, cmd: u8, address: u64, has_address: bool) -> bool {
+        if self.have_cmd_filter && !self.cmd_filter[cmd as usize] {
+            return false;
+        }
+        if self.have_addr_filter {
+            if !has_address {
+                return false;
+            }
+            if address < self.addr_start || address > self.addr_end {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -473,6 +520,11 @@ pub fn decode_spi_trace_reports(
                     j = MAX_TRACE_BLOCKLENGTH;
                 }
 
+                state.skipping = !state.shows(
+                    spi_command,
+                    state.address,
+                    spi_cmd_vals.address_type != AddressType::None,
+                );
                 state.cur_addr_type = spi_cmd_vals.address_type;
 
                 if state.brief {
@@ -480,26 +532,28 @@ pub fn decode_spi_trace_reports(
                 } else {
                     state.counter += 1;
                 }
-                let output = if state.brief {
-                    if spi_cmd_vals.address_type != AddressType::None {
-                        format!(
-                            "0x{spi_command:02x} @ 0x{:08x} ({})\n",
-                            state.address, spi_cmd_vals.name
-                        )
+                if !state.skipping {
+                    let output = if state.brief {
+                        if spi_cmd_vals.address_type != AddressType::None {
+                            format!(
+                                "0x{spi_command:02x} @ 0x{:08x} ({})\n",
+                                state.address, spi_cmd_vals.name
+                            )
+                        } else {
+                            format!("0x{spi_command:02x} ({})\n", spi_cmd_vals.name)
+                        }
                     } else {
-                        format!("0x{spi_command:02x} ({})\n", spi_cmd_vals.name)
-                    }
-                } else {
-                    let rel_time = state.timestamp.saturating_sub(state.start_timestamp);
-                    format!(
-                        "\nTime: {:06}.{:08} command # {:<6} : 0x{spi_command:02x} - {}",
-                        rel_time / 100000000,
-                        rel_time % 100000000,
-                        state.counter,
-                        spi_cmd_vals.name
-                    )
-                };
-                events.push(TraceEvent::Output(output));
+                        let rel_time = state.timestamp.saturating_sub(state.start_timestamp);
+                        format!(
+                            "\nTime: {:06}.{:08} command # {:<6} : 0x{spi_command:02x} - {}",
+                            rel_time / 100000000,
+                            rel_time % 100000000,
+                            state.counter,
+                            spi_cmd_vals.name
+                        )
+                    };
+                    events.push(TraceEvent::Output(output));
+                }
                 state.curpos = 0;
                 state.outbytes = 0;
             }
@@ -515,7 +569,7 @@ pub fn decode_spi_trace_reports(
                 let mut output = String::new();
 
                 while j < blocklen {
-                    if state.outbytes == 0 {
+                    if state.outbytes == 0 && !state.skipping {
                         match state.cur_addr_type {
                             AddressType::Dynamic | AddressType::Addr3B | AddressType::Addr4B => {
                                 output
@@ -527,7 +581,9 @@ pub fn decode_spi_trace_reports(
                             AddressType::None => output.push_str("\n         : "),
                         }
                     }
-                    output.push_str(&format!("{:02x} ", data[payload_start + j]));
+                    if !state.skipping {
+                        output.push_str(&format!("{:02x} ", data[payload_start + j]));
+                    }
                     state.outbytes += 1;
                     if state.outbytes == 16 {
                         state.outbytes = 0;
@@ -865,6 +921,42 @@ mod tests {
                 "0x03 @ 0x12345678 (read)\n".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn trace_filter_hides_unlisted_commands() {
+        let read = report_with_record([1, 0, 0x03, 0x12, 0x34, 0x56, 0, 0]);
+        let mut state = TraceState::new(true, 3);
+        state.filter_command(0x9f);
+        let events = decode_spi_trace_reports(&[read], &mut state, 0).unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn trace_filter_shows_listed_commands() {
+        let read = report_with_record([1, 0, 0x03, 0x12, 0x34, 0x56, 0, 0]);
+        let mut state = TraceState::new(true, 3);
+        state.filter_command(0x03);
+        let events = decode_spi_trace_reports(&[read], &mut state, 0).unwrap();
+        assert_eq!(
+            events,
+            vec![TraceEvent::Output("0x03 @ 0x00123456 (read)\n".to_string())]
+        );
+    }
+
+    #[test]
+    fn trace_address_range_filters_by_address() {
+        let read = report_with_record([1, 0, 0x03, 0x12, 0x34, 0x56, 0, 0]);
+        let mut state = TraceState::new(true, 3);
+        state.filter_address(0x200000, 0x300000);
+        let events = decode_spi_trace_reports(&[read], &mut state, 0).unwrap();
+        assert!(events.is_empty());
+
+        let mut state = TraceState::new(true, 3);
+        state.filter_address(0x100000, 0x200000);
+        let read = report_with_record([1, 0, 0x03, 0x12, 0x34, 0x56, 0, 0]);
+        let events = decode_spi_trace_reports(&[read], &mut state, 0).unwrap();
+        assert_eq!(events.len(), 1);
     }
 
     #[test]

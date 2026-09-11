@@ -75,6 +75,14 @@ struct Args {
     #[arg(long = "truncate")]
     truncate: bool,
 
+    /// Only trace these SPI commands (hex, comma-separated)
+    #[arg(long = "trace-filter")]
+    trace_filter: Option<String>,
+
+    /// Only trace accesses in this address range (hex START:END)
+    #[arg(long = "trace-range")]
+    trace_range: Option<String>,
+
     /// Start emulation
     #[arg(short = 'r', long = "start")]
     start: bool,
@@ -154,6 +162,20 @@ struct Args {
     /// Print debug information
     #[arg(short = 'D', long = "debug")]
     debug: bool,
+}
+
+/// Parse a bare-hex value (with optional 0x prefix), as used by the
+/// trace filter options where command bytes and addresses are hex.
+fn parse_hex_strict(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let hex = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    if hex.is_empty() {
+        return None;
+    }
+    u64::from_str_radix(hex, 16).ok()
 }
 
 /// Parse a number with optional 0x hex prefix, else decimal.
@@ -773,6 +795,46 @@ async fn run(args: Args) {
         // the chip default, so decode with the same width instead of assuming
         // the 3-byte default.
         let mut trace_state = TraceState::new(args.brief, session.state().address_mode());
+
+        if let Some(filter) = &args.trace_filter {
+            let cmds: Option<Vec<u8>> = filter
+                .split(',')
+                .map(|part| {
+                    parse_hex_strict(part)
+                        .filter(|&cmd| cmd <= 0xff)
+                        .map(|cmd| cmd as u8)
+                })
+                .collect();
+            match cmds {
+                Some(cmds) => {
+                    for cmd in cmds {
+                        trace_state.filter_command(cmd);
+                    }
+                }
+                None => {
+                    eprintln!("Invalid trace filter: {}", filter);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        if let Some(range) = &args.trace_range {
+            let parts: Vec<&str> = range.split(':').collect();
+            let valid = match parts.as_slice() {
+                [start, end] => match (parse_hex_strict(start), parse_hex_strict(end)) {
+                    (Some(start), Some(end)) if end >= start => {
+                        trace_state.filter_address(start, end);
+                        true
+                    }
+                    _ => false,
+                },
+                _ => false,
+            };
+            if !valid {
+                eprintln!("Invalid trace range: {}", range);
+                std::process::exit(1);
+            }
+        }
 
         let mut usb_errors = 0u32;
 
