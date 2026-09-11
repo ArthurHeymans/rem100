@@ -325,6 +325,21 @@ impl Em100 {
             if run { 1 } else { 0 },
         )
         .await?;
+
+        // Read the state back: a mismatch can mean a slow FPGA rather than
+        // a failure (the C tool never checks), so warn instead of failing
+        // and keep exit-status semantics identical to em100. A failed read
+        // says nothing about whether the write landed, so ignore it.
+        if let Ok(actual_state) = self.get_state().await {
+            if actual_state != run {
+                eprintln!(
+                    "Warning: device still reports {} after {} emulation",
+                    if actual_state { "running" } else { "stopped" },
+                    if run { "starting" } else { "stopping" }
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -400,6 +415,8 @@ impl Em100 {
 
     /// Set chip type for emulation
     pub async fn set_chip_type(&mut self, chip: &ChipDesc) -> Result<()> {
+        // Like em100, this does not stop emulation itself: callers stop
+        // first (CLI --stop, the GUIs stop explicitly before calling).
         let fpga_voltage = if self.fpga & 0x8000 != 0 { 1800 } else { 3300 };
 
         // Check if we need to switch FPGA voltage
@@ -441,7 +458,9 @@ impl Em100 {
         crate::fpga::write_fpga_register(self, Register::CHIP_CONFIG_81.address(), 0x00).await?;
 
         // Reset the address width on every chip change, including when moving
-        // from a large chip back to a 3-byte-addressed chip.
+        // from a large chip back to a 3-byte-addressed chip. em100 never
+        // writes the address register here; rem100 does so deliberately
+        // instead of leaving a stale 4-byte mode behind.
         self.set_address_mode(chip.default_address_mode()).await?;
 
         Ok(())
