@@ -72,7 +72,7 @@ Shared and native-library modules:
 - `chips.rs` - Chip database parsing shared by native and WebAssembly builds
 - `device.rs` - Async `Em100` device operations (the only device API;
   native code drives the futures with `block_on`)
-- `usb.rs` - Async low-level USB communication
+- `usb.rs` - Async low-level USB communication with transfer timeouts
 - `sdram.rs` - SDRAM operations with progress callbacks
 - `firmware.rs` - Firmware operations with progress callbacks
 - `fpga.rs`, `spi.rs`, `system.rs` - Hardware operations
