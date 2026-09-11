@@ -611,8 +611,23 @@ async fn run(args: Args) {
     if args.trace || args.terminal || args.traceconsole {
         const MAX_USB_ERRORS: u32 = 10;
 
-        // Set hold pin to input if not explicitly set
-        if args.holdpin.is_none() {
+        // Let the target drive the hold pin while tracing, but only if it is
+        // floating, meaning nothing has asked for a particular state. Any
+        // other state was set deliberately, and boards with their own flash
+        // chip on the bus need it held low throughout, or they do not boot.
+        let take_over_hold_pin = if args.holdpin.is_none() {
+            match session.device_mut().get_hold_pin_state().await {
+                Ok(HoldPinState::Float) => true,
+                Ok(_) => false,
+                Err(e) => {
+                    eprintln!("Error: Failed to read the hold pin state: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            false
+        };
+        if take_over_hold_pin {
             if let Err(e) = session.set_hold_pin(HoldPinState::Input).await {
                 eprintln!("Error: Failed to set EM100 to input: {}", e);
                 std::process::exit(1);
@@ -697,8 +712,8 @@ async fn run(args: Args) {
             session.reset_spi_trace().await.ok();
         }
 
-        // Reset hold pin to float
-        if args.holdpin.is_none() {
+        // Put the hold pin back only if it was taken over above
+        if take_over_hold_pin {
             if let Err(e) = session.set_hold_pin(HoldPinState::Float).await {
                 eprintln!("Error: Failed to set EM100 to float: {}", e);
             }
