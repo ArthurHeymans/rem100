@@ -5,11 +5,12 @@
 
 use clap::Parser;
 use em100::chips::ChipDatabase;
-use em100::device::{Em100, HoldPinState, list_devices};
+use em100::device::{Em100, HoldPinState};
 use em100::download::update_all_files;
 use em100::firmware::{firmware_dump, firmware_update};
 use em100::image::autocorrect_image;
 use em100::trace::{self, TraceState};
+use futures_lite::future::block_on;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -129,6 +130,7 @@ struct Args {
     debug: bool,
 }
 
+/// Parse a number with optional 0x hex prefix, else decimal.
 fn parse_hex(s: &str) -> Option<u64> {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
@@ -158,11 +160,13 @@ fn parse_device(s: &str) -> (Option<u8>, Option<u8>, Option<u32>) {
 }
 
 fn main() {
-    let args = Args::parse();
+    block_on(run(Args::parse()));
+}
 
+async fn run(args: Args) {
     // Handle --list-devices
     if args.list_devices {
-        match list_devices() {
+        match Em100::list_devices().await {
             Ok(devices) => {
                 if devices.is_empty() {
                     println!("No EM100pro devices found.");
@@ -197,7 +201,7 @@ fn main() {
         .unwrap_or((None, None, None));
 
     // Open device
-    let mut em100 = match Em100::open(bus, device, serial) {
+    let mut em100 = match Em100::open(bus, device, serial).await {
         Ok(em100) => em100,
         Err(e) => {
             eprintln!("Error: {}", e);
@@ -249,7 +253,7 @@ fn main() {
     }
 
     // Print current state
-    match em100.get_state() {
+    match em100.get_state().await {
         Ok(running) => println!(
             "EM100Pro currently {}",
             if running { "running" } else { "stopped" }
@@ -257,21 +261,21 @@ fn main() {
         Err(_) => println!("EM100Pro state unknown"),
     }
 
-    if let Ok(state) = em100.get_hold_pin_state() {
+    if let Ok(state) = em100.get_hold_pin_state().await {
         println!("EM100Pro hold pin currently {}", state)
     }
     println!();
 
     // Debug mode
     if args.debug {
-        if let Err(e) = em100.debug() {
+        if let Err(e) = em100.debug().await {
             eprintln!("Debug error: {}", e);
         }
     }
 
     // Firmware update
     if let Some(firmware_in) = &args.firmware_update {
-        if let Err(e) = firmware_update(&em100, firmware_in, args.verify) {
+        if let Err(e) = firmware_update(&mut em100, firmware_in, args.verify).await {
             eprintln!("Firmware update error: {}", e);
             std::process::exit(1);
         }
@@ -280,7 +284,7 @@ fn main() {
 
     // Firmware dump
     if let Some(firmware_out) = &args.firmware_dump {
-        if let Err(e) = firmware_dump(&em100, firmware_out, false) {
+        if let Err(e) = firmware_dump(&mut em100, firmware_out, false).await {
             eprintln!("Firmware dump error: {}", e);
             std::process::exit(1);
         }
@@ -289,7 +293,7 @@ fn main() {
 
     // Firmware write (DPFW format)
     if let Some(firmware_out) = &args.firmware_write {
-        if let Err(e) = firmware_dump(&em100, firmware_out, true) {
+        if let Err(e) = firmware_dump(&mut em100, firmware_out, true).await {
             eprintln!("Firmware write error: {}", e);
             std::process::exit(1);
         }
@@ -304,7 +308,7 @@ fn main() {
         }
         match s.parse::<u32>() {
             Ok(serial) => {
-                if let Err(e) = em100.set_serial_no(serial) {
+                if let Err(e) = em100.set_serial_no(serial).await {
                     eprintln!("Error setting serial number: {}", e);
                     std::process::exit(1);
                 }
@@ -319,7 +323,7 @@ fn main() {
 
     // Stop emulation
     if args.stop {
-        if let Err(e) = em100.set_state(false) {
+        if let Err(e) = em100.set_state(false).await {
             eprintln!("Error stopping emulation: {}", e);
         } else {
             println!("Stopped EM100Pro");
@@ -329,7 +333,7 @@ fn main() {
     // Set chip type
     if let Some(chip) = &chip {
         println!("Configuring SPI flash chip emulation.");
-        if let Err(e) = em100.set_chip_type(chip) {
+        if let Err(e) = em100.set_chip_type(chip).await {
             eprintln!("Failed configuring chip type: {}", e);
             std::process::exit(1);
         }
@@ -338,7 +342,7 @@ fn main() {
 
     // Set address mode
     if let Some(mode) = args.address_mode {
-        if let Err(e) = em100.set_address_mode(mode) {
+        if let Err(e) = em100.set_address_mode(mode).await {
             eprintln!("Error: {}", e);
             std::process::exit(1);
         }
@@ -361,7 +365,7 @@ fn main() {
 
         if args.debug {
             println!("Setting anyways on your own risk (debug mode enabled)");
-            if em100.set_fpga_voltage(voltage_code).is_err() {
+            if em100.set_fpga_voltage(voltage_code).await.is_err() {
                 eprintln!("Failed configuring FPGA voltage.");
                 std::process::exit(1);
             }
@@ -372,7 +376,7 @@ fn main() {
     if let Some(holdpin) = &args.holdpin {
         match holdpin.parse::<HoldPinState>() {
             Ok(state) => {
-                if let Err(e) = em100.set_hold_pin_state(state) {
+                if let Err(e) = em100.set_hold_pin_state(state).await {
                     eprintln!("Failed configuring hold pin state: {}", e);
                     std::process::exit(1);
                 }
@@ -389,7 +393,7 @@ fn main() {
     if let Some(upload_file) = &args.upload {
         let maxlen = chip.as_ref().map(|c| c.size as usize).unwrap_or(0x4000000);
 
-        match em100.upload(0, maxlen) {
+        match em100.upload(0, maxlen).await {
             Ok(data) => {
                 let mut file = match File::create(upload_file) {
                     Ok(f) => f,
@@ -469,13 +473,13 @@ fn main() {
         // Handle start address
         if spi_start_address != 0 {
             // Read existing data and merge
-            match em100.upload(0, maxlen) {
+            match em100.upload(0, maxlen).await {
                 Ok(mut existing) => {
                     let start = spi_start_address as usize;
                     let end = start + data.len();
                     if end <= existing.len() {
                         existing[start..end].copy_from_slice(&data);
-                        if let Err(e) = em100.download(&existing, 0) {
+                        if let Err(e) = em100.download(&existing, 0).await {
                             eprintln!("Download error: {}", e);
                             std::process::exit(1);
                         }
@@ -486,14 +490,14 @@ fn main() {
                     std::process::exit(1);
                 }
             }
-        } else if let Err(e) = em100.download(&data, 0) {
+        } else if let Err(e) = em100.download(&data, 0).await {
             eprintln!("Download error: {}", e);
             std::process::exit(1);
         }
 
         // Verify
         if args.verify {
-            match em100.upload(spi_start_address, data.len()) {
+            match em100.upload(spi_start_address, data.len()).await {
                 Ok(readback) => {
                     if readback == data {
                         println!("Verify: PASS");
@@ -509,10 +513,9 @@ fn main() {
             }
         }
     }
-
     // Start emulation
     if args.start {
-        if let Err(e) = em100.set_state(true) {
+        if let Err(e) = em100.set_state(true).await {
             eprintln!("Error starting emulation: {}", e);
         } else {
             println!("Started EM100Pro");
@@ -525,7 +528,7 @@ fn main() {
 
         // Set hold pin to input if not explicitly set
         if args.holdpin.is_none() {
-            if let Err(e) = em100.set_hold_pin_state(HoldPinState::Input) {
+            if let Err(e) = em100.set_hold_pin_state(HoldPinState::Input).await {
                 eprintln!("Error: Failed to set EM100 to input: {}", e);
                 std::process::exit(1);
             }
@@ -533,18 +536,18 @@ fn main() {
 
         // Start emulation if not explicitly started or stopped
         if !args.start && !args.stop {
-            em100.set_state(true).ok();
+            em100.set_state(true).await.ok();
         }
 
         print!("Starting ");
 
         if args.trace || args.traceconsole {
-            trace::reset_spi_trace(&em100).ok();
+            trace::reset_spi_trace(&mut em100).await.ok();
             print!("trace{}", if args.terminal { " & " } else { "" });
         }
 
         if args.terminal {
-            trace::init_spi_terminal(&em100).ok();
+            trace::init_spi_terminal(&mut em100).await.ok();
             print!("terminal");
         }
 
@@ -560,20 +563,23 @@ fn main() {
         let address_length = args.length.as_ref().and_then(|s| parse_hex(s)).unwrap_or(0);
 
         let mut trace_state = TraceState::new(args.brief, args.address_mode.unwrap_or(3));
+
         let mut usb_errors = 0u32;
 
         while !exit_requested.load(Ordering::SeqCst) && usb_errors < MAX_USB_ERRORS {
             let ret = if args.traceconsole {
                 trace::read_spi_trace_console(
-                    &em100,
+                    &mut em100,
                     &mut trace_state,
                     address_offset,
                     address_length,
                 )
+                .await
             } else if args.trace {
-                trace::read_spi_trace(&em100, &mut trace_state, args.terminal, address_offset)
+                trace::read_spi_trace(&mut em100, &mut trace_state, args.terminal, address_offset)
+                    .await
             } else if args.terminal {
-                trace::read_spi_terminal(&em100, false)
+                trace::read_spi_terminal(&mut em100, false).await
             } else {
                 Ok(true)
             };
@@ -591,16 +597,16 @@ fn main() {
 
         // Stop emulation if not explicitly started or stopped
         if !args.start && !args.stop {
-            em100.set_state(false).ok();
+            em100.set_state(false).await.ok();
         }
 
         if args.trace {
-            trace::reset_spi_trace(&em100).ok();
+            trace::reset_spi_trace(&mut em100).await.ok();
         }
 
         // Reset hold pin to float
         if args.holdpin.is_none() {
-            if let Err(e) = em100.set_hold_pin_state(HoldPinState::Float) {
+            if let Err(e) = em100.set_hold_pin_state(HoldPinState::Float).await {
                 eprintln!("Error: Failed to set EM100 to float: {}", e);
             }
         }

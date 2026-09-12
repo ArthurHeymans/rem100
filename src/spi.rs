@@ -4,18 +4,12 @@ use crate::device::Em100;
 use crate::error::{Error, Result};
 use crate::protocol::spi as command;
 use crate::usb;
-use nusb::transfer::Buffer;
-use std::thread;
-use std::time::Duration;
-
-/// Default timeout for USB transfers
-const DEFAULT_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// Get SPI flash ID
-pub fn get_spi_flash_id(em100: &Em100) -> Result<u32> {
-    usb::send_command(em100, command::get_id())?;
+pub async fn get_spi_flash_id(em100: &mut Em100) -> Result<u32> {
+    usb::send_command(&mut em100.endpoint_out, command::get_id()).await?;
 
-    let data = usb::get_response(em100, 512)?;
+    let data = usb::get_response(&mut em100.endpoint_in, 512).await?;
 
     if data.len() == 3 {
         let id = ((data[0] as u32) << 16) | ((data[1] as u32) << 8) | (data[2] as u32);
@@ -26,19 +20,19 @@ pub fn get_spi_flash_id(em100: &Em100) -> Result<u32> {
 }
 
 /// Erase entire SPI flash
-pub fn erase_spi_flash(em100: &Em100) -> Result<()> {
-    usb::send_command(em100, command::erase())?;
+pub async fn erase_spi_flash(em100: &mut Em100) -> Result<()> {
+    usb::send_command(&mut em100.endpoint_out, command::erase()).await?;
 
     // Specification says to wait 5s before issuing another USB command
-    thread::sleep(Duration::from_secs(5));
+    usb::sleep_ms(5000).await;
     Ok(())
 }
 
 /// Poll SPI flash status
-pub fn poll_spi_flash_status(em100: &Em100) -> Result<bool> {
-    usb::send_command(em100, command::poll_status())?;
+pub async fn poll_spi_flash_status(em100: &mut Em100) -> Result<bool> {
+    usb::send_command(&mut em100.endpoint_out, command::poll_status()).await?;
 
-    let data = usb::get_response(em100, 1)?;
+    let data = usb::get_response(&mut em100.endpoint_in, 1).await?;
 
     if data.len() == 1 && data[0] == 1 {
         Ok(true) // ready
@@ -48,16 +42,16 @@ pub fn poll_spi_flash_status(em100: &Em100) -> Result<bool> {
 }
 
 /// Read a 256-byte page from SPI flash
-pub fn read_spi_flash_page(em100: &Em100, address: u32, buffer: &mut [u8]) -> Result<()> {
+pub async fn read_spi_flash_page(em100: &mut Em100, address: u32, buffer: &mut [u8]) -> Result<()> {
     if buffer.len() < 256 {
         return Err(Error::InvalidArgument(
             "Buffer must be at least 256 bytes".to_string(),
         ));
     }
 
-    usb::send_command(em100, command::read_page(address))?;
+    usb::send_command(&mut em100.endpoint_out, command::read_page(address)).await?;
 
-    let data = usb::get_response(em100, 256)?;
+    let data = usb::get_response(&mut em100.endpoint_in, 256).await?;
 
     if data.len() == 256 {
         buffer[..256].copy_from_slice(&data);
@@ -68,26 +62,20 @@ pub fn read_spi_flash_page(em100: &Em100, address: u32, buffer: &mut [u8]) -> Re
 }
 
 /// Write a 256-byte page to SPI flash
-pub fn write_spi_flash_page(em100: &Em100, address: u32, data: &[u8]) -> Result<()> {
+pub async fn write_spi_flash_page(em100: &mut Em100, address: u32, data: &[u8]) -> Result<()> {
     if data.len() > 256 {
         return Err(Error::InvalidArgument(
             "Data must be at most 256 bytes".to_string(),
         ));
     }
 
-    usb::send_command(em100, command::write_page(address))?;
+    usb::send_command(&mut em100.endpoint_out, command::write_page(address)).await?;
 
     // Pad data to 256 bytes if needed
     let mut page = [0xffu8; 256];
     page[..data.len()].copy_from_slice(data);
 
-    let buf = Buffer::from(page.to_vec());
-    let completion = em100
-        .endpoint_out
-        .borrow_mut()
-        .transfer_blocking(buf, DEFAULT_TIMEOUT);
-    completion.status?;
-    let bytes_sent = completion.actual_len;
+    let bytes_sent = usb::bulk_write(&mut em100.endpoint_out, &page).await?;
 
     if bytes_sent != 256 {
         return Err(Error::Communication(format!(
@@ -100,8 +88,8 @@ pub fn write_spi_flash_page(em100: &Em100, address: u32, data: &[u8]) -> Result<
 }
 
 /// Unlock SPI flash
-pub fn unlock_spi_flash(em100: &Em100) -> Result<()> {
-    usb::send_command(em100, command::unlock())?;
+pub async fn unlock_spi_flash(em100: &mut Em100) -> Result<()> {
+    usb::send_command(&mut em100.endpoint_out, command::unlock()).await?;
     Ok(())
 }
 
@@ -111,7 +99,7 @@ pub fn unlock_spi_flash(em100: &Em100) -> Result<()> {
 /// but the original C implementation does not actually wait. Omitting the wait
 /// here for compatibility and performance (firmware updates would otherwise
 /// take 155+ seconds for 31 sectors).
-pub fn erase_spi_flash_sector(em100: &Em100, sector: u8) -> Result<()> {
+pub async fn erase_spi_flash_sector(em100: &mut Em100, sector: u8) -> Result<()> {
     if sector > 31 {
         return Err(Error::InvalidArgument(format!(
             "Can't erase sector at address {:x}",
@@ -119,7 +107,7 @@ pub fn erase_spi_flash_sector(em100: &Em100, sector: u8) -> Result<()> {
         )));
     }
 
-    usb::send_command(em100, command::erase_sector(sector))?;
+    usb::send_command(&mut em100.endpoint_out, command::erase_sector(sector)).await?;
 
     Ok(())
 }
@@ -146,10 +134,14 @@ pub const UFIFO_EMPTY: u8 = 1 << 5;
 pub const DFIFO_EMPTY: u8 = 1 << 6;
 
 /// Read HT register
-pub fn read_ht_register(em100: &Em100, reg: HtRegister) -> Result<u8> {
-    usb::send_command(em100, command::read_ht_register(reg as u8))?;
+pub async fn read_ht_register(em100: &mut Em100, reg: HtRegister) -> Result<u8> {
+    usb::send_command(
+        &mut em100.endpoint_out,
+        command::read_ht_register(reg as u8),
+    )
+    .await?;
 
-    let data = usb::get_response(em100, 2)?;
+    let data = usb::get_response(&mut em100.endpoint_in, 2).await?;
 
     if data.len() == 2 && data[0] == 1 {
         Ok(data[1])
@@ -159,13 +151,17 @@ pub fn read_ht_register(em100: &Em100, reg: HtRegister) -> Result<u8> {
 }
 
 /// Write HT register
-pub fn write_ht_register(em100: &Em100, reg: HtRegister, val: u8) -> Result<()> {
-    usb::send_command(em100, command::write_ht_register(reg as u8, val))?;
+pub async fn write_ht_register(em100: &mut Em100, reg: HtRegister, val: u8) -> Result<()> {
+    usb::send_command(
+        &mut em100.endpoint_out,
+        command::write_ht_register(reg as u8, val),
+    )
+    .await?;
     Ok(())
 }
 
 /// Write to dFIFO
-pub fn write_dfifo(em100: &Em100, data: &[u8], timeout: u16) -> Result<()> {
+pub async fn write_dfifo(em100: &mut Em100, data: &[u8], timeout: u16) -> Result<()> {
     if data.len() > 512 {
         return Err(Error::InvalidArgument(
             "Length of data to be written to dFIFO can't be > 512".to_string(),
@@ -173,17 +169,15 @@ pub fn write_dfifo(em100: &Em100, data: &[u8], timeout: u16) -> Result<()> {
     }
 
     let length = data.len();
-    usb::send_command(em100, command::write_dfifo(length as u16, timeout))?;
+    usb::send_command(
+        &mut em100.endpoint_out,
+        command::write_dfifo(length as u16, timeout),
+    )
+    .await?;
 
-    let buf = Buffer::from(data.to_vec());
-    let completion = em100
-        .endpoint_out
-        .borrow_mut()
-        .transfer_blocking(buf, DEFAULT_TIMEOUT);
-    completion.status?;
-    let bytes_sent = completion.actual_len;
+    let bytes_sent = usb::bulk_write(&mut em100.endpoint_out, data).await?;
 
-    let response = usb::get_response(em100, 512)?;
+    let response = usb::get_response(&mut em100.endpoint_in, 512).await?;
 
     if response.len() == 2
         && ((response[0] as usize) << 8 | response[1] as usize) == length
@@ -196,19 +190,23 @@ pub fn write_dfifo(em100: &Em100, data: &[u8], timeout: u16) -> Result<()> {
 }
 
 /// Read from uFIFO
-pub fn read_ufifo(em100: &Em100, length: usize, timeout: u16) -> Result<Vec<u8>> {
+pub async fn read_ufifo(em100: &mut Em100, length: usize, timeout: u16) -> Result<Vec<u8>> {
     if length > 512 {
         return Err(Error::InvalidArgument(
             "Length of data to be read from uFIFO can't be > 512".to_string(),
         ));
     }
 
-    usb::send_command(em100, command::read_ufifo(length as u16, timeout))?;
+    usb::send_command(
+        &mut em100.endpoint_out,
+        command::read_ufifo(length as u16, timeout),
+    )
+    .await?;
 
-    let data = usb::get_response(em100, 512)?;
+    let data = usb::get_response(&mut em100.endpoint_in, 512).await?;
 
     // Get second response from read ufifo command
-    let _ = usb::get_response(em100, 2);
+    let _ = usb::get_response(&mut em100.endpoint_in, 2).await;
 
     if data.len() == length {
         Ok(data)

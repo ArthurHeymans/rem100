@@ -1,17 +1,14 @@
 //! SPI trace related operations
 
-#[cfg(not(target_arch = "wasm32"))]
 use crate::device::Em100;
 use crate::error::{Error, Result};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::fpga;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::protocol::fpga::Register;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::protocol::trace as command;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::spi;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::usb;
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::{self, Write};
@@ -358,20 +355,22 @@ impl TraceState {
 }
 
 /// Reset SPI trace buffer
-#[cfg(not(target_arch = "wasm32"))]
-pub fn reset_spi_trace(em100: &Em100) -> Result<()> {
-    usb::send_command(em100, command::reset())?;
+pub async fn reset_spi_trace(em100: &mut Em100) -> Result<()> {
+    usb::send_command(&mut em100.endpoint_out, command::reset()).await?;
     Ok(())
 }
 
-/// Read report buffer from device
-#[cfg(not(target_arch = "wasm32"))]
-fn read_report_buffer(em100: &Em100) -> Result<Vec<Vec<u8>>> {
-    usb::send_command(em100, command::read(REPORT_BUFFER_COUNT as u8, 0x15))?;
+/// Read report buffers from the device (one trace capture unit).
+pub(crate) async fn read_report_buffer(em100: &mut Em100) -> Result<Vec<Vec<u8>>> {
+    usb::send_command(
+        &mut em100.endpoint_out,
+        command::read(REPORT_BUFFER_COUNT as u8, 0x15),
+    )
+    .await?;
 
     let mut reportdata = Vec::with_capacity(REPORT_BUFFER_COUNT);
     for _ in 0..REPORT_BUFFER_COUNT {
-        let report = usb::get_response(em100, REPORT_BUFFER_LENGTH)?;
+        let report = usb::get_response(&mut em100.endpoint_in, REPORT_BUFFER_LENGTH).await?;
         reportdata.push(validate_spi_trace_report(report)?);
     }
     Ok(reportdata)
@@ -529,22 +528,23 @@ pub fn decode_spi_trace_reports(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn read_spi_trace_events(
-    em100: &Em100,
+async fn read_spi_trace_events(
+    em100: &mut Em100,
     state: &mut TraceState,
     addr_offset: u64,
 ) -> Result<Vec<TraceEvent>> {
-    let reports = read_report_buffer(em100)?;
+    let reports = read_report_buffer(em100).await?;
     decode_spi_trace_reports(&reports, state, addr_offset)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn read_spi_trace_output(
-    em100: &Em100,
+pub async fn read_spi_trace_output(
+    em100: &mut Em100,
     state: &mut TraceState,
     addr_offset: u64,
 ) -> Result<String> {
-    Ok(read_spi_trace_events(em100, state, addr_offset)?
+    Ok(read_spi_trace_events(em100, state, addr_offset)
+        .await?
         .into_iter()
         .filter_map(|event| match event {
             TraceEvent::Output(output) => Some(output),
@@ -555,17 +555,17 @@ pub fn read_spi_trace_output(
 
 /// Read SPI trace data
 #[cfg(not(target_arch = "wasm32"))]
-pub fn read_spi_trace(
-    em100: &Em100,
+pub async fn read_spi_trace(
+    em100: &mut Em100,
     state: &mut TraceState,
     display_terminal: bool,
     addr_offset: u64,
 ) -> Result<bool> {
-    for event in read_spi_trace_events(em100, state, addr_offset)? {
+    for event in read_spi_trace_events(em100, state, addr_offset).await? {
         match event {
             TraceEvent::Output(output) => print!("{output}"),
             TraceEvent::Timestamp if display_terminal => {
-                read_spi_terminal(em100, true)?;
+                read_spi_terminal(em100, true).await?;
             }
             TraceEvent::Timestamp => {}
         }
@@ -598,8 +598,8 @@ static MSG_COUNTER: AtomicU32 = AtomicU32::new(1);
 
 /// Read SPI terminal messages
 #[cfg(not(target_arch = "wasm32"))]
-pub fn read_spi_terminal(em100: &Em100, show_counter: bool) -> Result<bool> {
-    let data = spi::read_ufifo(em100, UFIFO_SIZE, 0)?;
+pub async fn read_spi_terminal(em100: &mut Em100, show_counter: bool) -> Result<bool> {
+    let data = spi::read_ufifo(em100, UFIFO_SIZE, 0).await?;
 
     // First two bytes are the amount of valid data
     let data_length = ((data[0] as usize) << 8) | (data[1] as usize);
@@ -664,25 +664,26 @@ pub fn read_spi_terminal(em100: &Em100, show_counter: bool) -> Result<bool> {
 
 /// Initialize SPI terminal
 #[cfg(not(target_arch = "wasm32"))]
-pub fn init_spi_terminal(em100: &Em100) -> Result<()> {
-    spi::write_ht_register(em100, spi::HtRegister::UfifoDataFmt, 0)?;
-    spi::write_ht_register(em100, spi::HtRegister::Status, spi::START_SPI_EMULATION)?;
+pub async fn init_spi_terminal(em100: &mut Em100) -> Result<()> {
+    spi::write_ht_register(em100, spi::HtRegister::UfifoDataFmt, 0).await?;
+    spi::write_ht_register(em100, spi::HtRegister::Status, spi::START_SPI_EMULATION).await?;
 
     // Set EM100 to recognize SPI command 0x11
     fpga::write_fpga_register(
         em100,
         Register::SPI_COMMAND.address(),
         EM100_SPECIFIC_CMD as u16,
-    )?;
-    let _ = fpga::read_fpga_register(em100, Register::EMULATION_STATE.address())?;
+    )
+    .await?;
+    let _ = fpga::read_fpga_register(em100, Register::EMULATION_STATE.address()).await?;
 
     Ok(())
 }
 
 /// Read SPI trace in console mode
 #[cfg(not(target_arch = "wasm32"))]
-pub fn read_spi_trace_console(
-    em100: &Em100,
+pub async fn read_spi_trace_console(
+    em100: &mut Em100,
     state: &mut TraceState,
     addr_offset: u64,
     addr_len: u64,
@@ -698,7 +699,7 @@ pub fn read_spi_trace_console(
         ));
     }
 
-    let reportdata = read_report_buffer(em100)?;
+    let reportdata = read_report_buffer(em100).await?;
 
     for data in &reportdata {
         let count = ((data[0] as usize) << 8) | (data[1] as usize);

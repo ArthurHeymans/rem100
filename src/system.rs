@@ -45,10 +45,10 @@ pub enum LedState {
 /// Get firmware version information
 ///
 /// Returns (MCU version, FPGA version)
-pub fn get_version(em100: &Em100) -> Result<(u16, u16)> {
-    usb::send_command(em100, command::get_version())?;
+pub async fn get_version(em100: &mut Em100) -> Result<(u16, u16)> {
+    usb::send_command(&mut em100.endpoint_out, command::get_version()).await?;
 
-    let data = usb::get_response(em100, 512)?;
+    let data = usb::get_response(&mut em100.endpoint_in, 512).await?;
 
     if data.len() == 5 && data[0] == 4 {
         let mcu = ((data[3] as u16) << 8) | (data[4] as u16);
@@ -60,22 +60,26 @@ pub fn get_version(em100: &Em100) -> Result<(u16, u16)> {
 }
 
 /// Set voltage on a channel
-pub fn set_voltage(em100: &Em100, channel: SetVoltageChannel, mv: u16) -> Result<()> {
+pub async fn set_voltage(em100: &mut Em100, channel: SetVoltageChannel, mv: u16) -> Result<()> {
     if matches!(channel, SetVoltageChannel::BufferVcc) && mv != 18 && mv != 25 && mv != 33 {
         return Err(Error::InvalidArgument(
             "For Buffer VCC, voltage needs to be 1.8V, 2.5V or 3.3V".to_string(),
         ));
     }
 
-    usb::send_command(em100, command::set_voltage(channel as u8, mv))?;
+    usb::send_command(
+        &mut em100.endpoint_out,
+        command::set_voltage(channel as u8, mv),
+    )
+    .await?;
     Ok(())
 }
 
 /// Get voltage from a channel (returns millivolts)
-pub fn get_voltage(em100: &Em100, channel: GetVoltageChannel) -> Result<u32> {
-    usb::send_command(em100, command::get_voltage(channel as u8))?;
+pub async fn get_voltage(em100: &mut Em100, channel: GetVoltageChannel) -> Result<u32> {
+    usb::send_command(&mut em100.endpoint_out, command::get_voltage(channel as u8)).await?;
 
-    let data = usb::get_response(em100, 512)?;
+    let data = usb::get_response(&mut em100.endpoint_in, 512).await?;
 
     if data.len() == 3 && data[0] == 2 {
         let raw_voltage = ((data[1] as u32) << 8) | (data[2] as u32);
@@ -101,7 +105,7 @@ pub fn get_voltage(em100: &Em100, channel: GetVoltageChannel) -> Result<u32> {
 }
 
 /// Set LED state
-pub fn set_led(em100: &Em100, state: LedState) -> Result<()> {
-    usb::send_command(em100, command::set_led(state as u8))?;
+pub async fn set_led(em100: &mut Em100, state: LedState) -> Result<()> {
+    usb::send_command(&mut em100.endpoint_out, command::set_led(state as u8)).await?;
     Ok(())
 }

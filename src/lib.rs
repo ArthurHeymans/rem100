@@ -13,16 +13,19 @@
 //! # Example
 //!
 //! ```no_run
-//! use em100::{list_devices, Em100, Result};
+//! use em100::{Em100, Result};
+//! use futures_lite::future::block_on;
 //!
 //! fn main() -> Result<()> {
-//!     for (bus, address, serial) in list_devices()? {
-//!         println!("{bus}:{address} {serial}");
-//!     }
+//!     block_on(async {
+//!         for (bus, address, serial) in Em100::list_devices().await? {
+//!             println!("{bus}:{address} {serial}");
+//!         }
 //!
-//!     let device = Em100::open(None, None, None)?;
-//!     println!("{}", device.serial_string());
-//!     Ok(())
+//!         let device = Em100::open(None, None, None).await?;
+//!         println!("{}", device.serial_string());
+//!         Ok(())
+//!     })
 //! }
 //! ```
 //!
@@ -42,25 +45,17 @@ pub mod error;
 pub mod hexdump;
 pub mod protocol;
 
-// Image module requires device types
-#[cfg(not(target_arch = "wasm32"))]
-pub mod image;
-
-// Modules that require blocking USB operations (not available on wasm32)
-#[cfg(not(target_arch = "wasm32"))]
+// Async device access and helpers. Async is the only API: native code
+// drives these futures with futures_lite::future::block_on, and the
+// browser build awaits them on the JS event loop.
 pub mod device;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod firmware;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod fpga;
-#[cfg(not(target_arch = "wasm32"))]
+pub mod image;
 pub mod sdram;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod spi;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod system;
 pub mod trace;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod usb;
 
 // CLI-only modules
@@ -73,18 +68,12 @@ pub mod tar;
 #[cfg(all(feature = "web", not(target_arch = "wasm32")))]
 pub mod web;
 
-// Async WebUSB modules (for wasm32)
-#[cfg(target_arch = "wasm32")]
-pub mod web_device;
-#[cfg(target_arch = "wasm32")]
-pub mod web_usb;
-
 pub use chips::{ChipDatabase, ChipDesc, parse_dcfg};
 pub use error::{Error, Result};
 
 // Re-exports for native platforms only
 #[cfg(not(target_arch = "wasm32"))]
-pub use device::{DebugInfo, DeviceInfo, Em100, HoldPinState, HwVersion, Voltages, list_devices};
+pub use device::{DebugInfo, DeviceInfo, Em100, HoldPinState, HwVersion, Voltages};
 #[cfg(not(target_arch = "wasm32"))]
 pub use firmware::{
     FirmwareInfo, firmware_read, firmware_to_dpfw, firmware_write, validate_firmware,

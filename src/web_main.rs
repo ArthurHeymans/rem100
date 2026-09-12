@@ -13,8 +13,8 @@ fn main() -> eframe::Result<()> {
 mod wasm_app {
     use egui::Color32;
     use em100::chips::{ChipDatabase, ChipDesc};
+    use em100::device::{DeviceInfo, Em100, HoldPinState};
     use em100::trace::{TraceEvent, TraceState, decode_spi_trace_reports, trace_display_tail};
-    use em100::web_device::{DeviceInfo, Em100Async, HoldPinState};
     use std::cell::RefCell;
     use std::rc::Rc;
     use wasm_bindgen::JsCast;
@@ -50,7 +50,7 @@ mod wasm_app {
 
     /// Web app state shared with async tasks
     struct SharedState {
-        device: Option<Em100Async>,
+        device: Option<Em100>,
         device_info: Option<DeviceInfo>,
         is_running: bool,
         hold_pin_state: HoldPinState,
@@ -171,8 +171,8 @@ mod wasm_app {
             state.borrow_mut().connection_state = ConnectionState::Connecting;
 
             spawn_local(async move {
-                match Em100Async::request_device().await {
-                    Ok(device_info) => match Em100Async::open(device_info).await {
+                match Em100::request_device().await {
+                    Ok(device_info) => match Em100::open_device(device_info).await {
                         Ok(mut device) => {
                             let info = device.get_info();
                             let is_running = device.get_state().await.unwrap_or(false);
@@ -522,7 +522,10 @@ mod wasm_app {
                                     TraceEvent::Timestamp => None,
                                 })
                                 .collect();
-                            if !output.is_empty() {
+                            if output.is_empty() {
+                                // Idle bus: back off instead of hammering WebUSB.
+                                em100::usb::sleep_ms(10).await;
+                            } else {
                                 let mut s = state.borrow_mut();
                                 s.trace_output.push_str(&output);
                                 trim_trace_output(&mut s.trace_output);

@@ -1,25 +1,20 @@
-//! Core EM100 device structure and operations
+//! Async EM100 device access.
+//!
+//! This is the only device implementation. Native code drives the futures
+//! with futures_lite::future::block_on; browsers await them on the JS loop.
 
 use crate::chips::ChipDesc;
 use crate::error::{Error, Result};
-use crate::fpga;
-use crate::protocol::{chip as chip_command, fpga as fpga_command, fpga::Register};
-use crate::sdram;
-use crate::spi;
-use crate::system;
+use crate::protocol::{chip as chip_command, fpga::Register};
+use crate::system::{self, GetVoltageChannel, LedState};
 use crate::usb;
 use nusb::transfer::{Bulk, In, Out};
-use nusb::{Endpoint, MaybeFuture};
-use std::cell::RefCell;
-use std::time::Duration;
+use nusb::{Endpoint, Interface};
 
 /// EM100 USB Vendor ID
 pub const VENDOR_ID: u16 = 0x04b4;
-/// EM100 USB Product ID  
+/// EM100 USB Product ID
 pub const PRODUCT_ID: u16 = 0x1235;
-
-/// USB bulk transfer timeout in milliseconds
-pub const BULK_SEND_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// Hardware versions
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,12 +87,46 @@ impl std::fmt::Display for HoldPinState {
     }
 }
 
-/// EM100 device structure
+/// Device information structure
+#[derive(Debug, Clone)]
+pub struct DeviceInfo {
+    pub mcu_version: String,
+    pub fpga_version: String,
+    pub hw_version: HwVersion,
+    pub serial: String,
+    pub fpga_voltage: u16,
+}
+
+/// Voltage readings
+#[derive(Debug, Clone, Copy)]
+pub struct Voltages {
+    pub v1_2: u32,
+    pub e_vcc: u32,
+    pub ref_plus: u32,
+    pub ref_minus: u32,
+    pub buffer_vcc: u32,
+    pub trig_vcc: u32,
+    pub rst_vcc: u32,
+    pub v3_3: u32,
+    pub buffer_v3_3: u32,
+    pub v5: u32,
+}
+
+/// Debug information structure
+#[derive(Debug, Clone)]
+pub struct DebugInfo {
+    pub voltages: Voltages,
+    pub fpga_registers: [u16; 128],
+}
+
+/// Async EM100 device structure for WebUSB
 pub struct Em100 {
+    /// USB interface (held to keep the device claim alive)
+    _interface: Interface,
     /// USB bulk OUT endpoint
-    pub endpoint_out: RefCell<Endpoint<Bulk, Out>>,
+    pub endpoint_out: Endpoint<Bulk, Out>,
     /// USB bulk IN endpoint
-    pub endpoint_in: RefCell<Endpoint<Bulk, In>>,
+    pub endpoint_in: Endpoint<Bulk, In>,
     /// MCU firmware version
     pub mcu: u16,
     /// FPGA firmware version
@@ -113,134 +142,172 @@ const ENDPOINT_OUT: u8 = 0x01;
 const ENDPOINT_IN: u8 = 0x82;
 
 impl Em100 {
-    /// Open an EM100 device
+    /// List all connected EM100 devices as (bus, address, serial) tuples.
     ///
-    /// If bus and device are specified, opens the device at that location.
-    /// If serial_number is specified, opens the device with that serial number.
-    /// Otherwise, opens the first EM100 device found.
-    pub fn open(bus: Option<u8>, device: Option<u8>, serial_number: Option<u32>) -> Result<Self> {
-        let (endpoint_out, endpoint_in) = if let (Some(bus), Some(dev)) = (bus, device) {
-            // Find device by bus:device
-            Self::open_by_bus_device(bus, dev)?
-        } else if let Some(serial) = serial_number {
-            // Find device by serial number - need to open each and check
-            Self::open_by_serial(serial)?
-        } else {
-            // Open first available device
-            Self::open_first()?
-        };
+    /// USB bus topology is not visible through WebUSB, so this is
+    /// native-only; the browser UI uses the permission picker instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn list_devices() -> Result<Vec<(u8, u8, String)>> {
+        let mut devices = Vec::new();
+        for device in nusb::list_devices().await? {
+            if device.vendor_id() != VENDOR_ID || device.product_id() != PRODUCT_ID {
+                continue;
+            }
+            let bus = device.busnum();
+            let addr = device.device_address();
+            match Self::open_device(device).await {
+                Ok(em100) => devices.push((bus, addr, em100.serial_string())),
+                Err(_) => devices.push((bus, addr, "unknown".to_string())),
+            }
+        }
+        Ok(devices)
+    }
 
-        let mut em100 = Em100 {
-            endpoint_out: RefCell::new(endpoint_out),
-            endpoint_in: RefCell::new(endpoint_in),
+    /// Request access to an EM100 device via WebUSB permission prompt
+    ///
+    /// This must be called from a user gesture (e.g., button click) in the browser.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn request_device() -> Result<nusb::DeviceInfo> {
+        let selector = nusb::DeviceSelector::all().with_vid_pid(VENDOR_ID, PRODUCT_ID);
+        nusb::request_device(&[selector])
+            .await?
+            .ok_or(Error::DeviceNotFound)
+    }
+
+    fn with_endpoints(
+        endpoint_out: Endpoint<Bulk, Out>,
+        endpoint_in: Endpoint<Bulk, In>,
+        interface: Interface,
+    ) -> Self {
+        Em100 {
+            _interface: interface,
+            endpoint_out,
+            endpoint_in,
             mcu: 0,
             fpga: 0,
             serial_no: 0,
             hw_version: HwVersion::Unknown,
-        };
+        }
+    }
 
-        em100.init()?;
+    /// Open an EM100 device from a DeviceInfo
+    pub async fn open_device(device_info: nusb::DeviceInfo) -> Result<Self> {
+        let device = device_info.open().await?;
+        let interface = device.claim_interface(0).await?;
+        let endpoint_out = interface.endpoint::<Bulk, Out>(ENDPOINT_OUT)?;
+        let endpoint_in = interface.endpoint::<Bulk, In>(ENDPOINT_IN)?;
+
+        let mut em100 = Self::with_endpoints(endpoint_out, endpoint_in, interface);
+        em100.init().await?;
         Ok(em100)
     }
 
-    fn open_first() -> Result<(Endpoint<Bulk, Out>, Endpoint<Bulk, In>)> {
-        for device in nusb::list_devices().wait()? {
-            if device.vendor_id() == VENDOR_ID && device.product_id() == PRODUCT_ID {
-                let dev = device.open().wait()?;
-                let interface = dev.claim_interface(0).wait()?;
-                let endpoint_out = interface.endpoint::<Bulk, Out>(ENDPOINT_OUT)?;
-                let endpoint_in = interface.endpoint::<Bulk, In>(ENDPOINT_IN)?;
-                return Ok((endpoint_out, endpoint_in));
-            }
+    /// Open an EM100 device.
+    ///
+    /// If bus and device are specified, opens the device at that location.
+    /// If serial_number is specified, opens the device with that serial number.
+    /// Otherwise, opens the first EM100 device found.
+    pub async fn open(
+        bus: Option<u8>,
+        device: Option<u8>,
+        serial_number: Option<u32>,
+    ) -> Result<Self> {
+        // USB bus topology is not visible through WebUSB.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(bus), Some(dev)) = (bus, device) {
+            return Self::open_by_bus_device(bus, dev).await;
         }
-        Err(Error::DeviceNotFound)
+        // Bus topology is not visible through WebUSB; reject explicit
+        // addressing instead of silently opening the prompted device.
+        #[cfg(target_arch = "wasm32")]
+        if bus.is_some() || device.is_some() {
+            return Err(Error::InvalidArgument(
+                "Opening by USB bus/device is not supported in the browser; \
+                 use the permission prompt or a serial number instead"
+                    .to_string(),
+            ));
+        }
+        if let Some(serial) = serial_number {
+            Self::open_by_serial(serial).await
+        } else {
+            Self::open_first().await
+        }
     }
 
-    fn open_by_bus_device(bus: u8, dev: u8) -> Result<(Endpoint<Bulk, Out>, Endpoint<Bulk, In>)> {
-        for device in nusb::list_devices().wait()? {
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn open_by_bus_device(bus: u8, dev: u8) -> Result<Self> {
+        for device in nusb::list_devices().await? {
             if device.busnum() == bus && device.device_address() == dev {
                 if device.vendor_id() == VENDOR_ID && device.product_id() == PRODUCT_ID {
-                    let usb_dev = device.open().wait()?;
-                    let interface = usb_dev.claim_interface(0).wait()?;
-                    let endpoint_out = interface.endpoint::<Bulk, Out>(ENDPOINT_OUT)?;
-                    let endpoint_in = interface.endpoint::<Bulk, In>(ENDPOINT_IN)?;
-                    return Ok((endpoint_out, endpoint_in));
-                } else {
-                    return Err(Error::InvalidArgument(format!(
-                        "USB device on bus {:03}:{:02} is not an EM100pro",
-                        bus, dev
-                    )));
+                    return Self::open_device(device).await;
+                }
+                return Err(Error::InvalidArgument(format!(
+                    "USB device on bus {:03}:{:02} is not an EM100pro",
+                    bus, dev
+                )));
+            }
+        }
+        Err(Error::DeviceNotFound)
+    }
+
+    async fn open_by_serial(serial: u32) -> Result<Self> {
+        for device in nusb::list_devices().await? {
+            if device.vendor_id() == VENDOR_ID && device.product_id() == PRODUCT_ID {
+                if let Ok(em100) = Self::open_device(device).await {
+                    if em100.serial_no == serial {
+                        return Ok(em100);
+                    }
                 }
             }
         }
         Err(Error::DeviceNotFound)
     }
 
-    fn open_by_serial(serial: u32) -> Result<(Endpoint<Bulk, Out>, Endpoint<Bulk, In>)> {
-        for device in nusb::list_devices().wait()? {
+    /// Open the first available EM100 device
+    pub async fn open_first() -> Result<Self> {
+        for device in nusb::list_devices().await? {
             if device.vendor_id() == VENDOR_ID && device.product_id() == PRODUCT_ID {
-                let usb_dev = device.open().wait()?;
-                let interface = usb_dev.claim_interface(0).wait()?;
-                let endpoint_out = interface.endpoint::<Bulk, Out>(ENDPOINT_OUT)?;
-                let endpoint_in = interface.endpoint::<Bulk, In>(ENDPOINT_IN)?;
-                let mut em100 = Em100 {
-                    endpoint_out: RefCell::new(endpoint_out),
-                    endpoint_in: RefCell::new(endpoint_in),
-                    mcu: 0,
-                    fpga: 0,
-                    serial_no: 0,
-                    hw_version: HwVersion::Unknown,
-                };
-
-                // Try to init and check serial
-                if em100.init().is_ok() && em100.serial_no == serial {
-                    // Re-extract the endpoints (can't return from a moved em100)
-                    let endpoint_out = em100.endpoint_out.into_inner();
-                    let endpoint_in = em100.endpoint_in.into_inner();
-                    return Ok((endpoint_out, endpoint_in));
-                }
+                return Self::open_device(device).await;
             }
         }
         Err(Error::DeviceNotFound)
     }
 
     /// Initialize the device
-    fn init(&mut self) -> Result<()> {
-        // nusb handles kernel driver detachment and interface claiming automatically
-
+    async fn init(&mut self) -> Result<()> {
         // Check device status
-        if !self.check_status()? {
+        if !self.check_status().await? {
             return Err(Error::StatusUnknown);
         }
 
         // Get version information
-        self.get_version()?;
+        self.get_version().await?;
 
         // Get device info (serial number, hardware version)
-        self.get_device_info()?;
+        self.get_device_info().await?;
 
         Ok(())
     }
 
     /// Check device status by reading SPI flash ID
-    fn check_status(&self) -> Result<bool> {
-        let id = spi::get_spi_flash_id(self)?;
+    async fn check_status(&mut self) -> Result<bool> {
+        let id = crate::spi::get_spi_flash_id(self).await?;
         // Check for Micron M25P16 or MX77L12850F
         Ok(id == 0x202015 || id == 0xc27518)
     }
 
     /// Get firmware version information
-    fn get_version(&mut self) -> Result<()> {
-        let (mcu, fpga) = system::get_version(self)?;
+    async fn get_version(&mut self) -> Result<()> {
+        let (mcu, fpga) = crate::system::get_version(self).await?;
         self.mcu = mcu;
         self.fpga = fpga;
         Ok(())
     }
 
     /// Get device serial number and hardware version
-    fn get_device_info(&mut self) -> Result<()> {
+    async fn get_device_info(&mut self) -> Result<()> {
         let mut data = [0u8; 256];
-        spi::read_spi_flash_page(self, 0x1fff00, &mut data)?;
+        crate::spi::read_spi_flash_page(self, 0x1fff00, &mut data).await?;
 
         self.serial_no = (data[5] as u32) << 24
             | (data[4] as u32) << 16
@@ -251,40 +318,53 @@ impl Em100 {
     }
 
     /// Start or stop emulation
-    pub fn set_state(&self, run: bool) -> Result<()> {
-        fpga::write_fpga_register(
+    pub async fn set_state(&mut self, run: bool) -> Result<()> {
+        crate::fpga::write_fpga_register(
             self,
             Register::EMULATION_STATE.address(),
             if run { 1 } else { 0 },
-        )?;
+        )
+        .await?;
         Ok(())
     }
 
     /// Get current emulation state
-    pub fn get_state(&self) -> Result<bool> {
-        let state = fpga::read_fpga_register(self, Register::EMULATION_STATE.address())?;
+    pub async fn get_state(&mut self) -> Result<bool> {
+        let state =
+            crate::fpga::read_fpga_register(self, Register::EMULATION_STATE.address()).await?;
         Ok(state != 0)
     }
 
     /// Set address mode (3 or 4 byte)
-    pub fn set_address_mode(&self, mode: u8) -> Result<()> {
+    pub async fn set_address_mode(&mut self, mode: u8) -> Result<()> {
         if mode != 3 && mode != 4 {
             return Err(Error::InvalidArgument(format!(
                 "Invalid address mode: {}",
                 mode
             )));
         }
-        fpga::write_fpga_register(
+        crate::fpga::write_fpga_register(
             self,
             Register::ADDRESS_MODE.address(),
             if mode == 4 { 1 } else { 0 },
-        )?;
+        )
+        .await?;
         Ok(())
     }
 
+    /// Clear the FPGA SPI trace buffer.
+    pub async fn reset_spi_trace(&mut self) -> Result<()> {
+        crate::trace::reset_spi_trace(self).await
+    }
+
+    /// Fetch one complete set of SPI trace report buffers.
+    pub async fn read_spi_trace_reports(&mut self) -> Result<Vec<Vec<u8>>> {
+        crate::trace::read_report_buffer(self).await
+    }
+
     /// Get current hold pin state
-    pub fn get_hold_pin_state(&self) -> Result<HoldPinState> {
-        let val = fpga::read_fpga_register(self, Register::HOLD_PIN.address())?;
+    pub async fn get_hold_pin_state(&mut self) -> Result<HoldPinState> {
+        let val = crate::fpga::read_fpga_register(self, Register::HOLD_PIN.address()).await?;
         match val {
             0 => Ok(HoldPinState::Low),
             2 => Ok(HoldPinState::Float),
@@ -294,19 +374,20 @@ impl Em100 {
     }
 
     /// Set hold pin state
-    pub fn set_hold_pin_state(&self, state: HoldPinState) -> Result<()> {
+    pub async fn set_hold_pin_state(&mut self, state: HoldPinState) -> Result<()> {
         // Read and acknowledge current state
-        let val = fpga::read_fpga_register(self, Register::HOLD_PIN.address())?;
-        fpga::write_fpga_register(self, Register::HOLD_PIN.address(), (1 << 2) | val)?;
+        let val = crate::fpga::read_fpga_register(self, Register::HOLD_PIN.address()).await?;
+        crate::fpga::write_fpga_register(self, Register::HOLD_PIN.address(), (1 << 2) | val)
+            .await?;
 
         // Read again
-        let _ = fpga::read_fpga_register(self, Register::HOLD_PIN.address())?;
+        let _ = crate::fpga::read_fpga_register(self, Register::HOLD_PIN.address()).await?;
 
         // Set desired state
-        fpga::write_fpga_register(self, Register::HOLD_PIN.address(), state as u16)?;
+        crate::fpga::write_fpga_register(self, Register::HOLD_PIN.address(), state as u16).await?;
 
         // Verify
-        let new_val = fpga::read_fpga_register(self, Register::HOLD_PIN.address())?;
+        let new_val = crate::fpga::read_fpga_register(self, Register::HOLD_PIN.address()).await?;
         if new_val != state as u16 {
             return Err(Error::OperationFailed(format!(
                 "Failed to set hold pin state. Expected {:?}, got {}",
@@ -318,7 +399,7 @@ impl Em100 {
     }
 
     /// Set chip type for emulation
-    pub fn set_chip_type(&mut self, chip: &ChipDesc) -> Result<()> {
+    pub async fn set_chip_type(&mut self, chip: &ChipDesc) -> Result<()> {
         let fpga_voltage = if self.fpga & 0x8000 != 0 { 1800 } else { 3300 };
 
         // Check if we need to switch FPGA voltage
@@ -336,7 +417,7 @@ impl Em100 {
             };
 
             if let Some(voltage) = req_voltage {
-                if !self.set_fpga_voltage(voltage)? {
+                if !self.set_fpga_voltage(voltage).await? {
                     return Err(Error::OperationFailed(format!(
                         "The current FPGA firmware ({:.1}V) does not support {} {} ({:.1}V)",
                         fpga_voltage as f32 / 1000.0,
@@ -351,45 +432,41 @@ impl Em100 {
 
         // Send init sequence
         for entry in chip.init.iter().take(chip.init_len) {
-            usb::send_command(self, chip_command::initialize(entry))?;
+            usb::send_command(&mut self.endpoint_out, chip_command::initialize(entry)).await?;
         }
 
         // Set FPGA registers
-        fpga::write_fpga_register(self, Register::CHIP_CONFIG_C4.address(), 0x01)?;
-        fpga::write_fpga_register(self, Register::CHIP_CONFIG_10.address(), 0x00)?;
-        fpga::write_fpga_register(self, Register::CHIP_CONFIG_81.address(), 0x00)?;
+        crate::fpga::write_fpga_register(self, Register::CHIP_CONFIG_C4.address(), 0x01).await?;
+        crate::fpga::write_fpga_register(self, Register::CHIP_CONFIG_10.address(), 0x00).await?;
+        crate::fpga::write_fpga_register(self, Register::CHIP_CONFIG_81.address(), 0x00).await?;
 
         // Reset the address width on every chip change, including when moving
         // from a large chip back to a 3-byte-addressed chip.
-        self.set_address_mode(chip.default_address_mode())?;
+        self.set_address_mode(chip.default_address_mode()).await?;
 
         Ok(())
     }
 
     /// Set FPGA voltage (18 for 1.8V, 33 for 3.3V)
-    pub fn set_fpga_voltage(&mut self, voltage_code: u8) -> Result<bool> {
-        fpga::fpga_reconfigure(self)?;
-
-        usb::send_command(self, fpga_command::set_voltage(voltage_code))?;
+    pub async fn set_fpga_voltage(&mut self, voltage_code: u8) -> Result<bool> {
+        // Reconfigure FPGA
+        crate::fpga::fpga_reconfigure(self).await?;
+        crate::fpga::fpga_set_voltage(self, voltage_code).await?;
 
         // Must wait 2s before issuing any other USB command
-        std::thread::sleep(Duration::from_secs(2));
+        usb::sleep_ms(2000).await;
 
         // Verify
-        self.get_version().ok();
+        let _ = self.get_version().await;
         let actual = if self.fpga & 0x8000 != 0 { 18 } else { 33 };
 
-        if actual != voltage_code {
-            return Ok(false);
-        }
-
-        Ok(true)
+        Ok(actual == voltage_code)
     }
 
     /// Set serial number
-    pub fn set_serial_no(&mut self, serial: u32) -> Result<()> {
-        let mut data = [0u8; 512];
-        spi::read_spi_flash_page(self, 0x1fff00, &mut data[..256])?;
+    pub async fn set_serial_no(&mut self, serial: u32) -> Result<()> {
+        let mut data = [0u8; 256];
+        crate::spi::read_spi_flash_page(self, 0x1fff00, &mut data).await?;
 
         let old_serial = (data[5] as u32) << 24
             | (data[4] as u32) << 16
@@ -400,36 +477,40 @@ impl Em100 {
             return Ok(());
         }
 
-        data[2] = serial as u8;
-        data[3] = (serial >> 8) as u8;
-        data[4] = (serial >> 16) as u8;
-        data[5] = (serial >> 24) as u8;
+        let mut page = [0u8; 512];
+        page[..256].copy_from_slice(&data);
+        page[2] = serial as u8;
+        page[3] = (serial >> 8) as u8;
+        page[4] = (serial >> 16) as u8;
+        page[5] = (serial >> 24) as u8;
 
         if old_serial != 0xffffffff {
             // Preserve magic
-            spi::read_spi_flash_page(self, 0x1f0000, &mut data[256..512])?;
-            spi::unlock_spi_flash(self)?;
-            spi::get_spi_flash_id(self)?;
-            spi::erase_spi_flash_sector(self, 0x1f)?;
-            spi::write_spi_flash_page(self, 0x1f0000, &data[256..512])?;
+            let mut magic = [0u8; 256];
+            crate::spi::read_spi_flash_page(self, 0x1f0000, &mut magic).await?;
+            page[256..512].copy_from_slice(&magic);
+            crate::spi::unlock_spi_flash(self).await?;
+            crate::spi::get_spi_flash_id(self).await?;
+            crate::spi::erase_spi_flash_sector(self, 0x1f).await?;
+            crate::spi::write_spi_flash_page(self, 0x1f0000, &page[256..512]).await?;
         }
 
-        spi::write_spi_flash_page(self, 0x1fff00, &data[..256])?;
+        crate::spi::write_spi_flash_page(self, 0x1fff00, &page[..256]).await?;
 
         // Re-read serial number
-        self.get_device_info()?;
+        self.get_device_info().await?;
 
         Ok(())
     }
 
     /// Download data to SDRAM
-    pub fn download(&self, data: &[u8], address: u32) -> Result<()> {
-        sdram::write_sdram(self, data, address)
+    pub async fn download(&mut self, data: &[u8], address: u32) -> Result<()> {
+        crate::sdram::write_sdram(self, data, address).await
     }
 
     /// Upload data from SDRAM
-    pub fn upload(&self, address: u32, length: usize) -> Result<Vec<u8>> {
-        sdram::read_sdram(self, address, length)
+    pub async fn upload(&mut self, address: u32, length: usize) -> Result<Vec<u8>> {
+        crate::sdram::read_sdram(self, address, length).await
     }
 
     /// Get serial number as string
@@ -444,6 +525,88 @@ impl Em100 {
             };
             format!("{}{:06}", prefix, self.serial_no)
         }
+    }
+
+    /// Print device information (CLI convenience)
+    #[cfg(feature = "cli")]
+    pub fn print_info(&self) {
+        let info = self.get_info();
+        println!("MCU version: {}", info.mcu_version);
+        println!("FPGA version: {}", info.fpga_version);
+        println!("Hardware version: {:?}", info.hw_version);
+        println!("Serial number: {}", info.serial);
+    }
+
+    /// Get debug information (voltages and FPGA registers)
+    pub async fn get_debug_info(&mut self) -> Result<DebugInfo> {
+        system::set_led(self, LedState::BothOff).await?;
+        let v1_2 = system::get_voltage(self, GetVoltageChannel::V1_2).await?;
+        let e_vcc = system::get_voltage(self, GetVoltageChannel::EVcc).await?;
+        system::set_led(self, LedState::BothOn).await?;
+        let ref_plus = system::get_voltage(self, GetVoltageChannel::RefPlus).await?;
+        let ref_minus = system::get_voltage(self, GetVoltageChannel::RefMinus).await?;
+        system::set_led(self, LedState::RedOn).await?;
+        let buffer_vcc = system::get_voltage(self, GetVoltageChannel::BufferVcc).await?;
+        let trig_vcc = system::get_voltage(self, GetVoltageChannel::TriggerVcc).await?;
+        system::set_led(self, LedState::BothOn).await?;
+        let rst_vcc = system::get_voltage(self, GetVoltageChannel::ResetVcc).await?;
+        let v3_3 = system::get_voltage(self, GetVoltageChannel::V3_3).await?;
+        system::set_led(self, LedState::RedOn).await?;
+        let buffer_v3_3 = system::get_voltage(self, GetVoltageChannel::BufferV3_3).await?;
+        let v5 = system::get_voltage(self, GetVoltageChannel::V5).await?;
+        system::set_led(self, LedState::GreenOn).await?;
+
+        let mut fpga_registers = [0u16; 128];
+        for (i, register) in fpga_registers.iter_mut().enumerate() {
+            *register = crate::fpga::read_fpga_register(self, (i * 2) as u8)
+                .await
+                .unwrap_or(0xFFFF);
+        }
+
+        Ok(DebugInfo {
+            voltages: Voltages {
+                v1_2,
+                e_vcc,
+                ref_plus,
+                ref_minus,
+                buffer_vcc,
+                trig_vcc,
+                rst_vcc,
+                v3_3,
+                buffer_v3_3,
+                v5,
+            },
+            fpga_registers,
+        })
+    }
+
+    /// Debug mode - print voltages and FPGA registers (CLI convenience)
+    #[cfg(feature = "cli")]
+    pub async fn debug(&mut self) -> Result<()> {
+        let info = self.get_debug_info().await?;
+
+        println!("Voltages:");
+        println!("  1.2V:        {}mV", info.voltages.v1_2);
+        println!("  E_VCC:       {}mV", info.voltages.e_vcc);
+        println!("  REF+:        {}mV", info.voltages.ref_plus);
+        println!("  REF-:        {}mV", info.voltages.ref_minus);
+        println!("  Buffer VCC:  {}mV", info.voltages.buffer_vcc);
+        println!("  Trig VCC:    {}mV", info.voltages.trig_vcc);
+        println!("  RST VCC:     {}mV", info.voltages.rst_vcc);
+        println!("  3.3V:        {}mV", info.voltages.v3_3);
+        println!("  Buffer 3.3V: {}mV", info.voltages.buffer_v3_3);
+        println!("  5V:          {}mV", info.voltages.v5);
+
+        println!("\nFPGA registers:");
+        for i in 0..128 {
+            if i % 8 == 0 {
+                print!("\n  {:04x}: ", i * 2);
+            }
+            print!("{:04x} ", info.fpga_registers[i]);
+        }
+        println!();
+
+        Ok(())
     }
 
     /// Get device information as structured data
@@ -481,142 +644,4 @@ impl Em100 {
             fpga_voltage: if self.fpga & 0x8000 != 0 { 1800 } else { 3300 },
         }
     }
-
-    /// Print device information (CLI convenience)
-    #[cfg(feature = "cli")]
-    pub fn print_info(&self) {
-        let info = self.get_info();
-        println!("MCU version: {}", info.mcu_version);
-        println!("FPGA version: {}", info.fpga_version);
-        println!("Hardware version: {:?}", info.hw_version);
-        println!("Serial number: {}", info.serial);
-    }
-
-    /// Get debug information (voltages and FPGA registers)
-    pub fn get_debug_info(&self) -> Result<DebugInfo> {
-        system::set_led(self, system::LedState::BothOff)?;
-        let v1_2 = system::get_voltage(self, system::GetVoltageChannel::V1_2)?;
-        let e_vcc = system::get_voltage(self, system::GetVoltageChannel::EVcc)?;
-        system::set_led(self, system::LedState::BothOn)?;
-        let ref_plus = system::get_voltage(self, system::GetVoltageChannel::RefPlus)?;
-        let ref_minus = system::get_voltage(self, system::GetVoltageChannel::RefMinus)?;
-        system::set_led(self, system::LedState::RedOn)?;
-        let buffer_vcc = system::get_voltage(self, system::GetVoltageChannel::BufferVcc)?;
-        let trig_vcc = system::get_voltage(self, system::GetVoltageChannel::TriggerVcc)?;
-        system::set_led(self, system::LedState::BothOn)?;
-        let rst_vcc = system::get_voltage(self, system::GetVoltageChannel::ResetVcc)?;
-        let v3_3 = system::get_voltage(self, system::GetVoltageChannel::V3_3)?;
-        system::set_led(self, system::LedState::RedOn)?;
-        let buffer_v3_3 = system::get_voltage(self, system::GetVoltageChannel::BufferV3_3)?;
-        let v5 = system::get_voltage(self, system::GetVoltageChannel::V5)?;
-        system::set_led(self, system::LedState::GreenOn)?;
-
-        let mut fpga_registers = [0u16; 128];
-        for (i, register) in fpga_registers.iter_mut().enumerate() {
-            *register = fpga::read_fpga_register(self, (i * 2) as u8).unwrap_or(0xFFFF);
-        }
-
-        Ok(DebugInfo {
-            voltages: Voltages {
-                v1_2,
-                e_vcc,
-                ref_plus,
-                ref_minus,
-                buffer_vcc,
-                trig_vcc,
-                rst_vcc,
-                v3_3,
-                buffer_v3_3,
-                v5,
-            },
-            fpga_registers,
-        })
-    }
-
-    /// Debug mode - print voltages and FPGA registers (CLI convenience)
-    #[cfg(feature = "cli")]
-    pub fn debug(&self) -> Result<()> {
-        let info = self.get_debug_info()?;
-
-        println!("Voltages:");
-        println!("  1.2V:        {}mV", info.voltages.v1_2);
-        println!("  E_VCC:       {}mV", info.voltages.e_vcc);
-        println!("  REF+:        {}mV", info.voltages.ref_plus);
-        println!("  REF-:        {}mV", info.voltages.ref_minus);
-        println!("  Buffer VCC:  {}mV", info.voltages.buffer_vcc);
-        println!("  Trig VCC:    {}mV", info.voltages.trig_vcc);
-        println!("  RST VCC:     {}mV", info.voltages.rst_vcc);
-        println!("  3.3V:        {}mV", info.voltages.v3_3);
-        println!("  Buffer 3.3V: {}mV", info.voltages.buffer_v3_3);
-        println!("  5V:          {}mV", info.voltages.v5);
-
-        println!("\nFPGA registers:");
-        for i in 0..128 {
-            if i % 8 == 0 {
-                print!("\n  {:04x}: ", i * 2);
-            }
-            print!("{:04x} ", info.fpga_registers[i]);
-        }
-        println!();
-
-        Ok(())
-    }
-}
-
-/// Device information structure
-#[derive(Debug, Clone)]
-pub struct DeviceInfo {
-    pub mcu_version: String,
-    pub fpga_version: String,
-    pub hw_version: HwVersion,
-    pub serial: String,
-    pub fpga_voltage: u16,
-}
-
-/// Voltage readings
-#[derive(Debug, Clone, Copy)]
-pub struct Voltages {
-    pub v1_2: u32,
-    pub e_vcc: u32,
-    pub ref_plus: u32,
-    pub ref_minus: u32,
-    pub buffer_vcc: u32,
-    pub trig_vcc: u32,
-    pub rst_vcc: u32,
-    pub v3_3: u32,
-    pub buffer_v3_3: u32,
-    pub v5: u32,
-}
-
-/// Debug information structure
-#[derive(Debug, Clone)]
-pub struct DebugInfo {
-    pub voltages: Voltages,
-    pub fpga_registers: [u16; 128],
-}
-
-/// List all connected EM100 devices
-pub fn list_devices() -> Result<Vec<(u8, u8, String)>> {
-    let mut devices = Vec::new();
-
-    for device in nusb::list_devices().wait()? {
-        if device.vendor_id() != VENDOR_ID || device.product_id() != PRODUCT_ID {
-            continue;
-        }
-
-        let bus = device.busnum();
-        let addr = device.device_address();
-
-        // Try to get serial number
-        match Em100::open(Some(bus), Some(addr), None) {
-            Ok(em100) => {
-                devices.push((bus, addr, em100.serial_string()));
-            }
-            Err(_) => {
-                devices.push((bus, addr, "unknown".to_string()));
-            }
-        }
-    }
-
-    Ok(devices)
 }
