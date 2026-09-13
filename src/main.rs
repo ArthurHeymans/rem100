@@ -242,6 +242,11 @@ async fn read_memory_with_progress(
     result
 }
 
+/// Write a download image into SDRAM, stopping emulation first.
+///
+/// The target must not be reading the emulated memory while it is being
+/// rewritten, so this goes through the session's stop-before-mutation
+/// workflow instead of calling `write_memory` directly.
 async fn write_memory_with_progress(
     session: &mut DeviceSession,
     data: &[u8],
@@ -249,7 +254,7 @@ async fn write_memory_with_progress(
 ) -> em100::Result<()> {
     let progress = transfer_progress(data.len());
     let result = session
-        .write_memory(
+        .stop_and_write_memory(
             data,
             address,
             Some(&mut |bytes_sent, _| progress.set_position(bytes_sent as u64)),
@@ -435,10 +440,11 @@ async fn run(args: Args) {
         }
     }
 
-    // Set chip type
+    // Set chip type. Stop emulation first: the FPGA is reconfigured and the
+    // address width changes, so the target must not be reading the device.
     if let Some(chip) = &chip {
         println!("Configuring SPI flash chip emulation.");
-        if let Err(e) = session.configure_chip(chip).await {
+        if let Err(e) = session.stop_and_configure_chip(chip).await {
             eprintln!("Failed configuring chip type: {}", e);
             std::process::exit(1);
         }

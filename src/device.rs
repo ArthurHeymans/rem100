@@ -512,8 +512,8 @@ impl Em100 {
 
     /// Set chip type for emulation
     pub async fn set_chip_type(&mut self, chip: &ChipDesc) -> Result<()> {
-        // Like em100, this does not stop emulation itself: callers stop
-        // first (CLI --stop, the GUIs stop explicitly before calling).
+        // Like em100, this does not stop emulation itself: both frontends
+        // stop first through DeviceSession::stop_and_configure_chip.
         let fpga_voltage = if self.fpga & 0x8000 != 0 { 1800 } else { 3300 };
 
         // Check if we need to switch FPGA voltage
