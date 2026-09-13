@@ -55,6 +55,11 @@ mod wasm_app {
         in_flight_device_state: DeviceState,
         connection_state: ConnectionState,
         async_op: AsyncOp,
+        /// True while an async operation owns the session (the session has
+        /// been taken out of `device`). `async_op` doubles as a status message
+        /// and can be overwritten by unrelated work such as loading a file, so
+        /// it is not a reliable busy indicator on its own.
+        device_op_active: bool,
         progress: f32,
         progress_message: String,
         download_data: Option<Vec<u8>>, // data downloaded from device
@@ -72,6 +77,7 @@ mod wasm_app {
                 in_flight_device_state: DeviceState::default(),
                 connection_state: ConnectionState::Disconnected,
                 async_op: AsyncOp::Idle,
+                device_op_active: false,
                 progress: 0.0,
                 progress_message: String::new(),
                 download_data: None,
@@ -97,6 +103,7 @@ mod wasm_app {
             if let Some(device) = device.as_ref() {
                 self.in_flight_device_state = device.state().clone();
             }
+            self.device_op_active = true;
             device
         }
 
@@ -106,6 +113,13 @@ mod wasm_app {
                 .map(|device| device.state().clone())
                 .unwrap_or_default();
             self.device = device;
+            self.device_op_active = false;
+        }
+
+        /// Whether an async operation owns the session. Trace capture owns it
+        /// through `trace_active` instead.
+        fn device_busy(&self) -> bool {
+            self.device_op_active || matches!(self.async_op, AsyncOp::InProgress(_))
         }
     }
 
@@ -443,6 +457,13 @@ mod wasm_app {
 
             let generation = {
                 let mut s = self.state.borrow_mut();
+                if s.device_op_active {
+                    s.async_op = AsyncOp::Error(
+                        "Wait for the current device operation to finish before tracing"
+                            .to_string(),
+                    );
+                    return;
+                }
                 if s.device_state().configured_chip().is_none() {
                     s.async_op = AsyncOp::Error(
                         "Select and configure a chip before starting trace capture".to_string(),
@@ -610,7 +631,11 @@ mod wasm_app {
 
                             let mut s = state.borrow_mut();
                             s.pending_file = Some((filename, data));
-                            s.async_op = AsyncOp::Success("File loaded".to_string());
+                            // Do not clobber a running device operation's status;
+                            // `update` still reports the loaded file.
+                            if !s.device_busy() {
+                                s.async_op = AsyncOp::Success("File loaded".to_string());
+                            }
                         });
                     }
                 }
@@ -783,8 +808,7 @@ mod wasm_app {
             let state = self.state.borrow();
             let is_connected = matches!(state.connection_state, ConnectionState::Connected);
             let is_connecting = matches!(state.connection_state, ConnectionState::Connecting);
-            let disconnect_busy =
-                !state.trace_active && matches!(state.async_op, AsyncOp::InProgress(_));
+            let disconnect_busy = !state.trace_active && state.device_busy();
             drop(state);
 
             // Connect/disconnect buttons
@@ -841,8 +865,8 @@ mod wasm_app {
 
             let device_state = state.device_state();
             let device_info = device_state.info().cloned();
-            let is_running = device_state.is_running().unwrap_or(false);
-            let hold_pin_state = device_state.hold_pin_state().unwrap_or(HoldPinState::Float);
+            let is_running = device_state.is_running();
+            let hold_pin_state = device_state.hold_pin_state();
             let configured_chip = device_state.configured_chip().cloned();
             let address_mode = device_state.address_mode();
 
@@ -876,7 +900,7 @@ mod wasm_app {
 
             let chip_configured = configured_chip.is_some();
             let trace_active = state.trace_active;
-            let is_busy = matches!(state.async_op, AsyncOp::InProgress(_));
+            let is_busy = state.device_busy();
             drop(state);
 
             // Control panel
@@ -990,7 +1014,7 @@ mod wasm_app {
                 ui.horizontal(|ui| {
                     ui.label("Emulation:");
                     let start = ui.add_enabled(
-                        !is_running && chip_configured && !is_busy && !trace_active,
+                        is_running == Some(false) && chip_configured && !is_busy && !trace_active,
                         egui::Button::new("Start"),
                     );
                     if start.clicked() {
@@ -1001,7 +1025,7 @@ mod wasm_app {
                     }
                     if ui
                         .add_enabled(
-                            is_running && !is_busy && !trace_active,
+                            is_running == Some(true) && !is_busy && !trace_active,
                             egui::Button::new("Stop"),
                         )
                         .clicked()
@@ -1009,10 +1033,10 @@ mod wasm_app {
                         self.set_emulation_state(false);
                     }
 
-                    let status_text = if is_running {
-                        egui::RichText::new("Running").color(Color32::GREEN)
-                    } else {
-                        egui::RichText::new("Stopped").color(Color32::RED)
+                    let status_text = match is_running {
+                        Some(true) => egui::RichText::new("Running").color(Color32::GREEN),
+                        Some(false) => egui::RichText::new("Stopped").color(Color32::RED),
+                        None => egui::RichText::new("Unknown").color(Color32::GRAY),
                     };
                     ui.label(status_text);
                 });
@@ -1020,39 +1044,48 @@ mod wasm_app {
                 ui.add_space(8.0);
 
                 let mut hold_pin_to_set: Option<HoldPinState> = None;
-                ui.add_enabled_ui(!is_busy && !trace_active, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Hold Pin:");
-                        egui::ComboBox::from_id_salt("hold_pin")
-                            .selected_text(format!("{}", hold_pin_state))
-                            .show_ui(ui, |ui| {
-                                if ui
-                                    .selectable_label(
-                                        hold_pin_state == HoldPinState::Float,
-                                        "Float",
-                                    )
-                                    .clicked()
-                                {
-                                    hold_pin_to_set = Some(HoldPinState::Float);
-                                }
-                                if ui
-                                    .selectable_label(hold_pin_state == HoldPinState::Low, "Low")
-                                    .clicked()
-                                {
-                                    hold_pin_to_set = Some(HoldPinState::Low);
-                                }
-                                if ui
-                                    .selectable_label(
-                                        hold_pin_state == HoldPinState::Input,
-                                        "Input",
-                                    )
-                                    .clicked()
-                                {
-                                    hold_pin_to_set = Some(HoldPinState::Input);
-                                }
-                            });
-                    });
-                });
+                ui.add_enabled_ui(
+                    !is_busy && !trace_active && hold_pin_state.is_some(),
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Hold Pin:");
+                            egui::ComboBox::from_id_salt("hold_pin")
+                                .selected_text(match hold_pin_state {
+                                    Some(state) => format!("{}", state),
+                                    None => "Unknown".to_string(),
+                                })
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .selectable_label(
+                                            hold_pin_state == Some(HoldPinState::Float),
+                                            "Float",
+                                        )
+                                        .clicked()
+                                    {
+                                        hold_pin_to_set = Some(HoldPinState::Float);
+                                    }
+                                    if ui
+                                        .selectable_label(
+                                            hold_pin_state == Some(HoldPinState::Low),
+                                            "Low",
+                                        )
+                                        .clicked()
+                                    {
+                                        hold_pin_to_set = Some(HoldPinState::Low);
+                                    }
+                                    if ui
+                                        .selectable_label(
+                                            hold_pin_state == Some(HoldPinState::Input),
+                                            "Input",
+                                        )
+                                        .clicked()
+                                    {
+                                        hold_pin_to_set = Some(HoldPinState::Input);
+                                    }
+                                });
+                        });
+                    },
+                );
                 if let Some(new_state) = hold_pin_to_set {
                     self.set_hold_pin(new_state);
                 }
@@ -1066,8 +1099,7 @@ mod wasm_app {
                 let state = self.state.borrow();
                 let progress = state.progress;
                 let progress_message = state.progress_message.clone();
-                let is_busy =
-                    matches!(state.async_op, AsyncOp::InProgress(_)) || state.trace_active;
+                let is_busy = state.device_busy() || state.trace_active;
                 let download_data_len = state.download_data.as_ref().map(|d| d.len());
                 // Clone download data for save button (only when needed)
                 let download_data_for_save = state.download_data.clone();
@@ -1154,7 +1186,7 @@ mod wasm_app {
             let chip_configured = state.device_state().configured_chip().is_some();
             let trace_running = state.trace_running;
             let trace_active = state.trace_active;
-            let is_busy = matches!(state.async_op, AsyncOp::InProgress(_));
+            let is_busy = state.device_busy();
             drop(state);
 
             if !is_connected {
@@ -1303,7 +1335,7 @@ mod wasm_app {
 
             // Request repaint while async operations are in progress
             let state = self.state.borrow();
-            if matches!(state.async_op, AsyncOp::InProgress(_))
+            if state.device_busy()
                 || matches!(state.connection_state, ConnectionState::Connecting)
                 || state.trace_active
             {

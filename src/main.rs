@@ -624,7 +624,10 @@ async fn run(args: Args) {
 
         let address_length = args.length.as_ref().and_then(|s| parse_hex(s)).unwrap_or(0);
 
-        let mut trace_state = TraceState::new(args.brief, args.address_mode.unwrap_or(3));
+        // `--address-mode` is applied to the session above and `--set` records
+        // the chip default, so decode with the same width instead of assuming
+        // the 3-byte default.
+        let mut trace_state = TraceState::new(args.brief, session.state().address_mode());
 
         let mut usb_errors = 0u32;
 

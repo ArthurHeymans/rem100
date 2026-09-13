@@ -82,6 +82,12 @@ impl DeviceSession {
     }
 
     /// Access operations that are not yet represented as session workflows.
+    ///
+    /// The device returned here is untracked: calling [`Em100::set_state`],
+    /// [`Em100::set_hold_pin_state`], [`Em100::set_address_mode`], or
+    /// [`Em100::set_chip_type`] through it would leave [`DeviceState`] stale.
+    /// Use [`Self::set_emulation_state`], [`Self::set_hold_pin`],
+    /// [`Self::set_address_mode`], or [`Self::configure_chip`] instead.
     pub fn device_mut(&mut self) -> &mut Em100 {
         &mut self.device
     }
