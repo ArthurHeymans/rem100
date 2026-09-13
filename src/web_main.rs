@@ -1,12 +1,10 @@
 //! Web interface entry point for EM100Pro
 //!
-//! This binary provides a GUI interface using egui/eframe.
-//! It can run as a native desktop app or as a WebAssembly app in the browser.
+//! This binary provides the WebAssembly GUI using egui/eframe and WebUSB.
 
 #[cfg(not(target_arch = "wasm32"))]
-fn main() -> eframe::Result<()> {
-    env_logger::init();
-    em100::web::run()
+fn main() {
+    eprintln!("rem100-web is a WebAssembly application; build it with trunk");
 }
 
 #[cfg(target_arch = "wasm32")]

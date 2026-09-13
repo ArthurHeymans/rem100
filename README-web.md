@@ -4,20 +4,6 @@ This document describes the web interface for the EM100Pro SPI flash emulator.
 
 ## Building
 
-### Native Desktop GUI
-
-The native desktop GUI works with the current setup:
-
-```bash
-# Enter the development environment
-nix develop
-
-# Build and run the native GUI
-cargo run --no-default-features --features native-gui --bin rem100-web
-```
-
-### Web (WASM) Build
-
 The web build uses the WebUSB support included in `nusb` 0.2.6 and later. No patched `nusb` branch is required.
 
 Build with:
@@ -81,17 +67,16 @@ Shared and native-library modules:
 
 Command-line interface using clap. Built with `--features cli`.
 
-### Web GUI (`src/web.rs`, `src/web_main.rs`)
+### Web GUI (`src/web_main.rs`)
 
-egui/eframe-based GUI. Built with `--features web`.
+egui/eframe WebUSB GUI. Built for WebAssembly with `--features web`.
 
 ## Feature Flags
 
-| Feature         | Description                                              |
-| --------------- | -------------------------------------------------------- |
-| `cli` (default) | Builds the CLI and CLI-only download/archive helpers     |
-| `web`           | Builds the egui GUI, including browser WebUSB            |
-| `native-gui`    | Enables `web` plus native file dialogs                   |
+| Feature         | Description                                          |
+| --------------- | ---------------------------------------------------- |
+| `cli` (default) | Builds the CLI and CLI-only download/archive helpers |
+| `web`           | Builds the egui WebAssembly GUI with browser WebUSB  |
 
 ## WebUSB Requirements
 

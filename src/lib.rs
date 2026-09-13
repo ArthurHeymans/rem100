@@ -64,10 +64,6 @@ pub mod download;
 #[cfg(feature = "cli")]
 pub mod tar;
 
-// Web module (native GUI only, not wasm32)
-#[cfg(all(feature = "web", not(target_arch = "wasm32")))]
-pub mod web;
-
 pub use chips::{ChipDatabase, ChipDesc, parse_dcfg};
 pub use error::{Error, Result};
 
