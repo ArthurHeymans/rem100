@@ -60,6 +60,7 @@ Shared and native-library modules:
   native code drives the futures with `block_on`)
 - `usb.rs` - Async low-level USB communication with transfer timeouts
 - `sdram.rs` - SDRAM operations with progress callbacks
+- `session.rs` - Shared stateful hardware workflows used by the CLI and web UI
 - `firmware.rs` - Firmware operations with progress callbacks
 - `fpga.rs`, `spi.rs`, `system.rs` - Hardware operations
 
