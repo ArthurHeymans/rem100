@@ -119,7 +119,7 @@ pub struct DebugInfo {
     pub fpga_registers: [u16; 128],
 }
 
-/// Async EM100 device structure for WebUSB
+/// Async EM100 device, shared by the CLI and the WebUSB UI.
 pub struct Em100 {
     /// USB interface (held to keep the device claim alive)
     _interface: Interface,

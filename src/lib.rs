@@ -44,6 +44,7 @@ pub mod chips;
 pub mod error;
 pub mod hexdump;
 pub mod protocol;
+pub mod session;
 
 // Async device access and helpers. Async is the only API: native code
 // drives these futures with futures_lite::future::block_on, and the
@@ -64,12 +65,9 @@ pub mod download;
 #[cfg(feature = "cli")]
 pub mod tar;
 
-// Web module (native GUI only, not wasm32)
-#[cfg(all(feature = "web", not(target_arch = "wasm32")))]
-pub mod web;
-
 pub use chips::{ChipDatabase, ChipDesc, parse_dcfg};
 pub use error::{Error, Result};
+pub use session::DeviceSession;
 
 // Re-exports for native platforms only
 #[cfg(not(target_arch = "wasm32"))]

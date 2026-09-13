@@ -81,17 +81,7 @@ The core native library API does not require the `cli` feature. CLI-only downloa
 
 ### Web Interface
 
-A GUI interface is available in two variants:
-
-#### Native Desktop GUI
-
-```bash
-cargo run --no-default-features --features native-gui --bin rem100-web
-```
-
-#### Web (WASM) Interface
-
-A WebUSB-based web interface using egui/eframe:
+A WebUSB-based web interface using egui/eframe is available:
 
 ```bash
 # Install trunk (if not already installed)

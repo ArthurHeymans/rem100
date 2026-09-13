@@ -1,19 +1,18 @@
 //! Web interface entry point for EM100Pro
 //!
-//! This binary provides a GUI interface using egui/eframe.
-//! It can run as a native desktop app or as a WebAssembly app in the browser.
+//! This binary provides the WebAssembly GUI using egui/eframe and WebUSB.
 
 #[cfg(not(target_arch = "wasm32"))]
-fn main() -> eframe::Result<()> {
-    env_logger::init();
-    em100::web::run()
+fn main() {
+    eprintln!("rem100-web is a WebAssembly application; build it with trunk");
 }
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_app {
     use egui::Color32;
     use em100::chips::{ChipDatabase, ChipDesc};
-    use em100::device::{DeviceInfo, Em100, HoldPinState};
+    use em100::device::{Em100, HoldPinState};
+    use em100::session::{DeviceSession, DeviceState};
     use em100::trace::{TraceEvent, TraceState, decode_spi_trace_reports, trace_display_tail};
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -50,18 +49,16 @@ mod wasm_app {
 
     /// Web app state shared with async tasks
     struct SharedState {
-        device: Option<Em100>,
-        device_info: Option<DeviceInfo>,
-        is_running: bool,
-        hold_pin_state: HoldPinState,
+        device: Option<DeviceSession>,
+        /// Last state shown while an async operation temporarily owns the
+        /// session, or the disconnected default when no session exists.
+        in_flight_device_state: DeviceState,
         connection_state: ConnectionState,
         async_op: AsyncOp,
         progress: f32,
         progress_message: String,
         download_data: Option<Vec<u8>>, // data downloaded from device
         pending_file: Option<(String, Vec<u8>)>, // (filename, data) from file picker
-        configured_chip: Option<Rc<ChipDesc>>,
-        address_mode: u8,
         trace_running: bool,
         trace_active: bool,
         trace_generation: u64,
@@ -72,22 +69,43 @@ mod wasm_app {
         fn default() -> Self {
             Self {
                 device: None,
-                device_info: None,
-                is_running: false,
-                hold_pin_state: HoldPinState::Float,
+                in_flight_device_state: DeviceState::default(),
                 connection_state: ConnectionState::Disconnected,
                 async_op: AsyncOp::Idle,
                 progress: 0.0,
                 progress_message: String::new(),
                 download_data: None,
                 pending_file: None,
-                configured_chip: None,
-                address_mode: 3,
                 trace_running: false,
                 trace_active: false,
                 trace_generation: 0,
                 trace_output: String::new(),
             }
+        }
+    }
+
+    impl SharedState {
+        fn device_state(&self) -> &DeviceState {
+            self.device
+                .as_ref()
+                .map(DeviceSession::state)
+                .unwrap_or(&self.in_flight_device_state)
+        }
+
+        fn take_device(&mut self) -> Option<DeviceSession> {
+            let device = self.device.take();
+            if let Some(device) = device.as_ref() {
+                self.in_flight_device_state = device.state().clone();
+            }
+            device
+        }
+
+        fn restore_device(&mut self, device: Option<DeviceSession>) {
+            self.in_flight_device_state = device
+                .as_ref()
+                .map(|device| device.state().clone())
+                .unwrap_or_default();
+            self.device = device;
         }
     }
 
@@ -97,8 +115,6 @@ mod wasm_app {
         state: Rc<RefCell<SharedState>>,
         /// Available chips with cached display names
         available_chips: Vec<ChipInfo>,
-        /// Selected chip
-        selected_chip: Option<Rc<ChipDesc>>,
         /// Chip search query
         chip_search: String,
         /// File data to upload to device
@@ -107,8 +123,7 @@ mod wasm_app {
         upload_filename: String,
         /// Start address for upload
         start_address: String,
-        /// Address mode (3 or 4)
-        address_mode: u8,
+
         /// Compact trace output
         trace_brief: bool,
         /// Address offset applied to trace output
@@ -150,12 +165,11 @@ mod wasm_app {
             Self {
                 state: Rc::new(RefCell::new(SharedState::default())),
                 available_chips,
-                selected_chip: None,
                 chip_search: String::new(),
                 upload_file_data: None,
                 upload_filename: String::new(),
                 start_address: "0".to_string(),
-                address_mode: 3,
+
                 trace_brief: false,
                 trace_address_offset: "0".to_string(),
                 current_panel: Panel::Device,
@@ -167,30 +181,27 @@ mod wasm_app {
         fn request_device(&mut self) {
             let state = self.state.clone();
 
-            // Mark as connecting
-            state.borrow_mut().connection_state = ConnectionState::Connecting;
+            // Reset the previous connection state before requesting another
+            // device so failed state reads cannot leak stale values.
+            {
+                let mut state = state.borrow_mut();
+                state.restore_device(None);
+                state.connection_state = ConnectionState::Connecting;
+            }
 
             spawn_local(async move {
                 match Em100::request_device().await {
                     Ok(device_info) => match Em100::open_device(device_info).await {
-                        Ok(mut device) => {
-                            let info = device.get_info();
-                            let is_running = device.get_state().await.unwrap_or(false);
-                            let hold_pin = device
-                                .get_hold_pin_state()
-                                .await
-                                .unwrap_or(HoldPinState::Float);
-
+                        Ok(device) => {
+                            let session = DeviceSession::new(device).await;
                             let mut s = state.borrow_mut();
-                            s.device_info = Some(info);
-                            s.is_running = is_running;
-                            s.hold_pin_state = hold_pin;
-                            s.device = Some(device);
+                            s.restore_device(Some(session));
                             s.connection_state = ConnectionState::Connected;
                             s.async_op = AsyncOp::Success("Connected successfully".to_string());
                         }
                         Err(e) => {
                             let mut s = state.borrow_mut();
+                            s.restore_device(None);
                             s.connection_state =
                                 ConnectionState::Error(format!("Failed to open device: {}", e));
                             s.async_op = AsyncOp::Error(format!("Connection failed: {}", e));
@@ -198,6 +209,7 @@ mod wasm_app {
                     },
                     Err(e) => {
                         let mut s = state.borrow_mut();
+                        s.restore_device(None);
                         s.connection_state =
                             ConnectionState::Error(format!("No device selected: {}", e));
                         s.async_op = AsyncOp::Error(format!("Device request failed: {}", e));
@@ -211,14 +223,9 @@ mod wasm_app {
             s.trace_running = false;
             s.trace_active = false;
             s.trace_generation = s.trace_generation.wrapping_add(1);
-            s.device = None;
-            s.device_info = None;
-            s.configured_chip = None;
-            s.address_mode = 3;
+            s.restore_device(None);
             s.connection_state = ConnectionState::Disconnected;
             s.async_op = AsyncOp::Success("Disconnected".to_string());
-            self.selected_chip = None;
-            self.address_mode = 3;
         }
 
         fn set_emulation_state(&mut self, running: bool) {
@@ -228,7 +235,14 @@ mod wasm_app {
                 );
                 return;
             }
-            if running && self.state.borrow().configured_chip.is_none() {
+            if running
+                && self
+                    .state
+                    .borrow()
+                    .device_state()
+                    .configured_chip()
+                    .is_none()
+            {
                 self.state.borrow_mut().async_op = AsyncOp::Error(
                     "Select and configure a chip before starting emulation".to_string(),
                 );
@@ -248,11 +262,11 @@ mod wasm_app {
                 // Take device out of state to avoid holding borrow across await
                 let device = {
                     let mut s = state.borrow_mut();
-                    s.device.take()
+                    s.take_device()
                 };
 
                 let (result, device) = if let Some(mut dev) = device {
-                    let res = dev.set_state(running).await;
+                    let res = dev.set_emulation_state(running).await;
                     (Some(res), Some(dev))
                 } else {
                     (None, None)
@@ -260,10 +274,9 @@ mod wasm_app {
 
                 // Put device back and update state
                 let mut s = state.borrow_mut();
-                s.device = device;
+                s.restore_device(device);
                 match result {
                     Some(Ok(_)) => {
-                        s.is_running = running;
                         s.async_op = AsyncOp::Success(
                             if running {
                                 "Emulation started"
@@ -298,7 +311,7 @@ mod wasm_app {
                 // Take device out of state to avoid holding borrow across await
                 let device = {
                     let mut s = state.borrow_mut();
-                    s.device.take()
+                    s.take_device()
                 };
 
                 let (result, device) = if let Some(mut dev) = device {
@@ -310,10 +323,9 @@ mod wasm_app {
 
                 // Put device back and update state
                 let mut s = state.borrow_mut();
-                s.device = device;
+                s.restore_device(device);
                 match result {
                     Some(Ok(_)) => {
-                        s.address_mode = mode;
                         s.async_op = AsyncOp::Success(format!("Address mode set to {}-byte", mode));
                     }
                     Some(Err(e)) => {
@@ -340,11 +352,11 @@ mod wasm_app {
                 // Take device out of state to avoid holding borrow across await
                 let device = {
                     let mut s = state.borrow_mut();
-                    s.device.take()
+                    s.take_device()
                 };
 
                 let (result, device) = if let Some(mut dev) = device {
-                    let res = dev.set_hold_pin_state(hold_state).await;
+                    let res = dev.set_hold_pin(hold_state).await;
                     (Some(res), Some(dev))
                 } else {
                     (None, None)
@@ -352,10 +364,9 @@ mod wasm_app {
 
                 // Put device back and update state
                 let mut s = state.borrow_mut();
-                s.device = device;
+                s.restore_device(device);
                 match result {
                     Some(Ok(_)) => {
-                        s.hold_pin_state = hold_state;
                         s.async_op = AsyncOp::Success(format!("Hold pin set to {}", hold_state));
                     }
                     Some(Err(e)) => {
@@ -379,7 +390,6 @@ mod wasm_app {
             let chip_for_async = chip.clone();
             {
                 let mut s = state.borrow_mut();
-                s.configured_chip = None;
                 s.async_op = AsyncOp::InProgress(format!(
                     "Setting chip to {} {}...",
                     chip.vendor, chip.name
@@ -390,11 +400,11 @@ mod wasm_app {
                 // Take device out of state to avoid holding borrow across await
                 let device = {
                     let mut s = state.borrow_mut();
-                    s.device.take()
+                    s.take_device()
                 };
 
                 let (result, device) = if let Some(mut dev) = device {
-                    let res = dev.set_chip_type(&chip_for_async).await;
+                    let res = dev.stop_and_configure_chip(&chip_for_async).await;
                     (Some(res), Some(dev))
                 } else {
                     (None, None)
@@ -402,16 +412,13 @@ mod wasm_app {
 
                 // Put device back and update state
                 let mut s = state.borrow_mut();
-                s.device = device;
+                s.restore_device(device);
                 match result {
                     Some(Ok(_)) => {
-                        // set_chip_type stops emulation, so update is_running
-                        s.is_running = false;
-                        s.address_mode = chip_for_async.default_address_mode();
-                        s.configured_chip = Some(chip_for_async.clone());
+                        let address_mode = s.device_state().address_mode();
                         s.async_op = AsyncOp::Success(format!(
                             "Chip set to {} {} ({}-byte addressing)",
-                            chip_for_async.vendor, chip_for_async.name, s.address_mode
+                            chip_for_async.vendor, chip_for_async.name, address_mode
                         ));
                     }
                     Some(Err(e)) => {
@@ -436,7 +443,7 @@ mod wasm_app {
 
             let generation = {
                 let mut s = self.state.borrow_mut();
-                if s.configured_chip.is_none() {
+                if s.device_state().configured_chip().is_none() {
                     s.async_op = AsyncOp::Error(
                         "Select and configure a chip before starting trace capture".to_string(),
                     );
@@ -455,7 +462,7 @@ mod wasm_app {
             let state = self.state.clone();
             let repaint = ctx.clone();
             let brief = self.trace_brief;
-            let address_mode = self.address_mode;
+            let address_mode = self.state.borrow().device_state().address_mode();
             spawn_local(async move {
                 let mut device = state.borrow_mut().device.take();
                 let reset_result = match device.as_mut() {
@@ -636,13 +643,17 @@ mod wasm_app {
                 // Take device out of state to avoid holding borrow across await
                 let device = {
                     let mut s = state.borrow_mut();
-                    s.device.take()
+                    s.take_device()
                 };
 
                 let (result, device) = if let Some(mut dev) = device {
-                    // Stop emulation before writing to memory
-                    let _ = dev.set_state(false).await;
-                    let res = dev.download(&data, start_addr).await;
+                    let progress_state = state.clone();
+                    let mut progress = move |done: usize, total: usize| {
+                        progress_state.borrow_mut().progress = done as f32 / total.max(1) as f32;
+                    };
+                    let res = dev
+                        .stop_and_write_memory(&data, start_addr, Some(&mut progress))
+                        .await;
                     (Some(res), Some(dev))
                 } else {
                     (None, None)
@@ -650,22 +661,22 @@ mod wasm_app {
 
                 // Put device back and update state
                 let mut s = state.borrow_mut();
-                s.device = device;
-                s.progress = 1.0;
+                s.restore_device(device);
+                s.progress_message.clear();
                 match result {
                     Some(Ok(_)) => {
-                        // Emulation was stopped before upload
-                        s.is_running = false;
+                        s.progress = 1.0;
                         s.async_op = AsyncOp::Success(
                             "Upload complete. Emulation stopped - press Start to resume."
                                 .to_string(),
                         );
                     }
                     Some(Err(e)) => {
-                        s.is_running = false;
+                        s.progress = 0.0;
                         s.async_op = AsyncOp::Error(format!("Upload failed: {}", e));
                     }
                     None => {
+                        s.progress = 0.0;
                         s.async_op = AsyncOp::Error("No device connected".to_string());
                     }
                 }
@@ -674,9 +685,11 @@ mod wasm_app {
 
         fn download_from_device(&mut self) {
             let size = self
-                .selected_chip
-                .as_ref()
-                .map(|c| c.size as usize)
+                .state
+                .borrow()
+                .device_state()
+                .configured_chip()
+                .map(|chip| chip.size as usize)
                 .unwrap_or(0x4000000);
 
             let state = self.state.clone();
@@ -692,11 +705,15 @@ mod wasm_app {
                 // Take device out of state to avoid holding borrow across await
                 let device = {
                     let mut s = state.borrow_mut();
-                    s.device.take()
+                    s.take_device()
                 };
 
                 let (result, device) = if let Some(mut dev) = device {
-                    let res = dev.upload(0, size).await;
+                    let progress_state = state.clone();
+                    let mut progress = move |done: usize, total: usize| {
+                        progress_state.borrow_mut().progress = done as f32 / total.max(1) as f32;
+                    };
+                    let res = dev.read_memory(0, size, Some(&mut progress)).await;
                     (Some(res), Some(dev))
                 } else {
                     (None, None)
@@ -704,17 +721,20 @@ mod wasm_app {
 
                 // Put device back and update state
                 let mut s = state.borrow_mut();
-                s.device = device;
-                s.progress = 1.0;
+                s.restore_device(device);
+                s.progress_message.clear();
                 match result {
                     Some(Ok(data)) => {
+                        s.progress = 1.0;
                         s.download_data = Some(data);
                         s.async_op = AsyncOp::Success("Download complete".to_string());
                     }
                     Some(Err(e)) => {
+                        s.progress = 0.0;
                         s.async_op = AsyncOp::Error(format!("Download failed: {}", e));
                     }
                     None => {
+                        s.progress = 0.0;
                         s.async_op = AsyncOp::Error("No device connected".to_string());
                     }
                 }
@@ -819,8 +839,15 @@ mod wasm_app {
                 }
             }
 
+            let device_state = state.device_state();
+            let device_info = device_state.info().cloned();
+            let is_running = device_state.is_running().unwrap_or(false);
+            let hold_pin_state = device_state.hold_pin_state().unwrap_or(HoldPinState::Float);
+            let configured_chip = device_state.configured_chip().cloned();
+            let address_mode = device_state.address_mode();
+
             // Device info
-            if let Some(ref info) = state.device_info {
+            if let Some(ref info) = device_info {
                 ui.add_space(16.0);
                 ui.separator();
                 ui.heading("Device Information");
@@ -847,9 +874,7 @@ mod wasm_app {
                     });
             }
 
-            let is_running = state.is_running;
-            let hold_pin_state = state.hold_pin_state;
-            let chip_configured = state.configured_chip.is_some();
+            let chip_configured = configured_chip.is_some();
             let trace_active = state.trace_active;
             let is_busy = matches!(state.async_op, AsyncOp::InProgress(_));
             drop(state);
@@ -864,7 +889,7 @@ mod wasm_app {
 
                 let mut chip_to_set: Option<Rc<ChipDesc>> = None;
                 let popup_id = ui.make_persistent_id("chip_selector_popup");
-                let selected_text = if let Some(ref chip) = self.selected_chip {
+                let selected_text = if let Some(ref chip) = configured_chip {
                     format!("{} {} ({} bytes)", chip.vendor, chip.name, chip.size)
                 } else {
                     "Select chip...".to_string()
@@ -904,10 +929,12 @@ mod wasm_app {
                                             .to_lowercase()
                                             .contains(&search_lower)
                                     {
-                                        let is_selected = self
-                                            .selected_chip
+                                        let is_selected = configured_chip
                                             .as_ref()
-                                            .map(|c| Rc::ptr_eq(c, &chip_info.chip))
+                                            .map(|chip| {
+                                                chip.vendor == chip_info.chip.vendor
+                                                    && chip.name == chip_info.chip.name
+                                            })
                                             .unwrap_or(false);
                                         if ui
                                             .selectable_label(is_selected, &chip_info.display_name)
@@ -925,14 +952,13 @@ mod wasm_app {
                     self.set_chip(chip);
                 }
 
-                if let Some((inferred_mode, size_mib)) = self
-                    .selected_chip
+                if let Some((inferred_mode, size_mib)) = configured_chip
                     .as_ref()
                     .map(|chip| (chip.default_address_mode(), chip.size / (1024 * 1024)))
                 {
                     ui.label(format!(
                         "Addressing: {}-byte (selected automatically for this chip)",
-                        self.address_mode
+                        address_mode
                     ));
                     ui.collapsing("Advanced addressing override", |ui| {
                         ui.label(format!(
@@ -940,14 +966,14 @@ mod wasm_app {
                             inferred_mode,
                             size_mib
                         ));
-                        let mut requested_mode = self.address_mode;
+                        let mut requested_mode = address_mode;
                         ui.add_enabled_ui(!is_busy && !trace_active, |ui| {
                             ui.horizontal(|ui| {
                                 ui.selectable_value(&mut requested_mode, 3, "3-byte");
                                 ui.selectable_value(&mut requested_mode, 4, "4-byte");
                             });
                         });
-                        if requested_mode != self.address_mode {
+                        if requested_mode != address_mode {
                             self.set_address_mode(requested_mode);
                         }
                     });
@@ -1098,8 +1124,7 @@ mod wasm_app {
                         ui.label(format!("{} bytes", len));
                         if ui.button("Save As...").clicked() {
                             if let Some(ref data) = download_data_for_save {
-                                let filename = self
-                                    .selected_chip
+                                let filename = configured_chip
                                     .as_ref()
                                     .map(|c| format!("{}.bin", c.name))
                                     .unwrap_or_else(|| "memory.bin".to_string());
@@ -1126,7 +1151,7 @@ mod wasm_app {
 
             let state = self.state.borrow();
             let is_connected = matches!(state.connection_state, ConnectionState::Connected);
-            let chip_configured = state.configured_chip.is_some();
+            let chip_configured = state.device_state().configured_chip().is_some();
             let trace_running = state.trace_running;
             let trace_active = state.trace_active;
             let is_busy = matches!(state.async_op, AsyncOp::InProgress(_));
@@ -1215,12 +1240,6 @@ mod wasm_app {
 
     impl eframe::App for Em100WebApp {
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-            {
-                let state = self.state.borrow();
-                self.selected_chip = state.configured_chip.clone();
-                self.address_mode = state.address_mode;
-            }
-
             // Check for pending file from file picker
             if let Ok(mut state) = self.state.try_borrow_mut() {
                 if let Some((filename, data)) = state.pending_file.take() {
