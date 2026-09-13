@@ -3,7 +3,7 @@
 //! This is the only device implementation. Native code drives the futures
 //! with futures_lite::future::block_on; browsers await them on the JS loop.
 
-use crate::chips::ChipDesc;
+use crate::chips::{ChipDatabase, ChipDesc};
 use crate::error::{Error, Result};
 use crate::protocol::{chip as chip_command, fpga::Register};
 use crate::system::{self, GetVoltageChannel, LedState};
@@ -317,6 +317,103 @@ impl Em100 {
         Ok(())
     }
 
+    /// Pulse the reset line of the target system for `ms` milliseconds.
+    ///
+    /// Bit 0 of FPGA register 0x10 is the reset line: clearing it asserts
+    /// reset and setting it releases it again. The pulse width is timed by
+    /// the host, as the Windows software does.
+    pub async fn reset_target(&mut self, ms: u32) -> Result<()> {
+        crate::fpga::write_fpga_register(self, Register::RESET_LINE.address(), 0x0e)
+            .await
+            .map_err(|_| Error::OperationFailed("Couldn't assert reset.".to_string()))?;
+
+        usb::sleep_ms(ms).await;
+
+        crate::fpga::write_fpga_register(self, Register::RESET_LINE.address(), 0x0f)
+            .await
+            .map_err(|_| Error::OperationFailed("Couldn't release reset.".to_string()))?;
+
+        Ok(())
+    }
+
+    /// Check whether `length` bytes of emulated memory are blank (all 0xff).
+    ///
+    /// The EM100 has no blank-check command of its own, so the whole
+    /// emulation buffer is read over USB and checked on the host, as the
+    /// Windows software does.
+    pub async fn blank_check(&mut self, length: usize) -> Result<()> {
+        let data = self.upload(0, length).await.map_err(|_| {
+            Error::OperationFailed("Couldn't read the emulated memory.".to_string())
+        })?;
+        if let Some(offset) = data.iter().position(|&b| b != 0xff) {
+            return Err(Error::OperationFailed(format!(
+                "Blank check failed: found 0x{:02x} at 0x{:x}",
+                data[offset], offset
+            )));
+        }
+        println!("Blank check passed");
+        Ok(())
+    }
+
+    /// Show a checksum of `length` bytes of emulated memory.
+    ///
+    /// A plain 32-bit sum of the bytes, matching the Windows software. Like
+    /// the blank check, the memory is read over USB and added up on the host.
+    pub async fn checksum(&mut self, length: usize) -> Result<()> {
+        let data = self.upload(0, length).await.map_err(|_| {
+            Error::OperationFailed("Couldn't read the emulated memory.".to_string())
+        })?;
+        let sum = data.iter().fold(0u32, |acc, &b| acc.wrapping_add(b as u32));
+        println!("Checksum: 0x{:08x}", sum);
+        Ok(())
+    }
+
+    /// Identify the currently emulated flash chip.
+    ///
+    /// Reads the vendor and device IDs from the FPGA and matches them
+    /// against the init sequences in the chip database. Only the first
+    /// emulated chip is covered: the second-chip register mapping is
+    /// tied to chip selection, which is not ported.
+    pub async fn get_chip_type(&mut self, db: &ChipDatabase) -> Result<ChipDesc> {
+        let venid = crate::fpga::read_fpga_register(self, Register::CHIP_VENDID.address()).await?;
+        let devid = crate::fpga::read_fpga_register(self, Register::CHIP_DEVID.address()).await?;
+        db.chips
+            .iter()
+            .find(|chip| {
+                chip.init_register_value(Register::CHIP_DEVID.address()) == Some(devid)
+                    && chip.init_register_value(Register::CHIP_VENDID.address()) == Some(venid)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                Error::InvalidChip(format!(
+                    "Could not identify emulated chip (venid 0x{:04x}, devid 0x{:04x})",
+                    venid, devid
+                ))
+            })
+    }
+
+    /// Work out how large the emulated chip is.
+    ///
+    /// Returns the selected chip's size when one was given, otherwise asks
+    /// the EM100 what it is currently emulating, falling back to the
+    /// largest size supported (64MB) when that cannot be determined.
+    pub async fn emulation_size(
+        &mut self,
+        selected: Option<&ChipDesc>,
+        db: Option<&ChipDatabase>,
+    ) -> usize {
+        if let Some(chip) = selected {
+            return chip.size as usize;
+        }
+        if let Some(db) = db {
+            if let Ok(emulated) = self.get_chip_type(db).await {
+                println!("Configured to emulate {}kB chip", emulated.size / 1024);
+                return emulated.size as usize;
+            }
+        }
+        0x4000000
+    }
+
     /// Start or stop emulation
     pub async fn set_state(&mut self, run: bool) -> Result<()> {
         crate::fpga::write_fpga_register(
@@ -325,6 +422,21 @@ impl Em100 {
             if run { 1 } else { 0 },
         )
         .await?;
+
+        // Read the state back: a mismatch can mean a slow FPGA rather than
+        // a failure (the C tool never checks), so warn instead of failing
+        // and keep exit-status semantics identical to em100. A failed read
+        // says nothing about whether the write landed, so ignore it.
+        if let Ok(actual_state) = self.get_state().await {
+            if actual_state != run {
+                eprintln!(
+                    "Warning: device still reports {} after {} emulation",
+                    if actual_state { "running" } else { "stopped" },
+                    if run { "starting" } else { "stopping" }
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -336,19 +448,19 @@ impl Em100 {
     }
 
     /// Set address mode (3 or 4 byte)
-    pub async fn set_address_mode(&mut self, mode: u8) -> Result<()> {
+    ///
+    /// `enter_4byte` allows the emulated chip to enter 4-byte addressing in
+    /// response to a target command (bit 4 of FPGA register 0x4f, sharing
+    /// the register with the default address length in bit 0).
+    pub async fn set_address_mode(&mut self, mode: u8, enter_4byte: bool) -> Result<()> {
         if mode != 3 && mode != 4 {
             return Err(Error::InvalidArgument(format!(
                 "Invalid address mode: {}",
                 mode
             )));
         }
-        crate::fpga::write_fpga_register(
-            self,
-            Register::ADDRESS_MODE.address(),
-            if mode == 4 { 1 } else { 0 },
-        )
-        .await?;
+        let value = (if mode == 4 { 1 } else { 0 }) | (u16::from(enter_4byte) << 4);
+        crate::fpga::write_fpga_register(self, Register::ADDRESS_MODE.address(), value).await?;
         Ok(())
     }
 
@@ -400,6 +512,8 @@ impl Em100 {
 
     /// Set chip type for emulation
     pub async fn set_chip_type(&mut self, chip: &ChipDesc) -> Result<()> {
+        // Like em100, this does not stop emulation itself: callers stop
+        // first (CLI --stop, the GUIs stop explicitly before calling).
         let fpga_voltage = if self.fpga & 0x8000 != 0 { 1800 } else { 3300 };
 
         // Check if we need to switch FPGA voltage
@@ -441,8 +555,11 @@ impl Em100 {
         crate::fpga::write_fpga_register(self, Register::CHIP_CONFIG_81.address(), 0x00).await?;
 
         // Reset the address width on every chip change, including when moving
-        // from a large chip back to a 3-byte-addressed chip.
-        self.set_address_mode(chip.default_address_mode()).await?;
+        // from a large chip back to a 3-byte-addressed chip. em100 never
+        // writes the address register here; rem100 does so deliberately
+        // instead of leaving a stale 4-byte mode behind.
+        self.set_address_mode(chip.default_address_mode(), false)
+            .await?;
 
         Ok(())
     }

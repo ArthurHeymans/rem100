@@ -47,9 +47,41 @@ struct Args {
     #[arg(short = 'm', long = "address-mode")]
     address_mode: Option<u8>,
 
+    /// Allow the target to enter 4-byte address mode (on|off)
+    #[arg(long = "enter-4byte-mode")]
+    enter_4byte_mode: Option<String>,
+
     /// Upload from EM100pro into FILE
     #[arg(short = 'u', long = "upload")]
     upload: Option<String>,
+
+    /// Pulse the target reset line for MS milliseconds
+    #[arg(long = "reset")]
+    reset: Option<u32>,
+
+    /// Check the emulated memory is erased
+    #[arg(long = "blank-check")]
+    blank_check: bool,
+
+    /// Show a checksum of the emulated memory
+    #[arg(long = "checksum")]
+    checksum: bool,
+
+    /// Pad a short download image out to the chip size with BYTE
+    #[arg(long = "fill")]
+    fill: Option<String>,
+
+    /// Allow an oversized download image to be truncated
+    #[arg(long = "truncate")]
+    truncate: bool,
+
+    /// Only trace these SPI commands (hex, comma-separated)
+    #[arg(long = "trace-filter")]
+    trace_filter: Option<String>,
+
+    /// Only trace accesses in this address range (hex START:END)
+    #[arg(long = "trace-range")]
+    trace_range: Option<String>,
 
     /// Start emulation
     #[arg(short = 'r', long = "start")]
@@ -132,7 +164,25 @@ struct Args {
     debug: bool,
 }
 
+/// Parse a bare-hex value (with optional 0x prefix), as used by the
+/// trace filter options where command bytes and addresses are hex.
+fn parse_hex_strict(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let hex = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    if hex.is_empty() {
+        return None;
+    }
+    u64::from_str_radix(hex, 16).ok()
+}
+
 /// Parse a number with optional 0x hex prefix, else decimal.
+///
+/// Deliberately broader than em100, which scans addresses with %x (bare
+/// values are hex there): switching would reinterpret existing rem100
+/// scripts, so 0x-prefixed values stay hex and the rest stay decimal.
 fn parse_hex(s: &str) -> Option<u64> {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
@@ -395,13 +445,35 @@ async fn run(args: Args) {
         println!("Chip set to {} {}.", chip.vendor, chip.name);
     }
 
-    // Set address mode
-    if let Some(mode) = args.address_mode {
-        if let Err(e) = session.set_address_mode(mode).await {
+    // Work out the address mode. -m forces it; otherwise a chip larger than
+    // 16MB is switched to 4-byte mode automatically. The register is only
+    // written when there is a reason to.
+    let enter_4byte: Option<bool> = match &args.enter_4byte_mode {
+        None => None,
+        Some(enter) => match enter.to_lowercase().as_str() {
+            "on" => Some(true),
+            "off" => Some(false),
+            _ => {
+                eprintln!("Invalid 4 byte mode entry: {}", enter);
+                std::process::exit(1);
+            }
+        },
+    };
+    let auto_4byte =
+        args.address_mode.is_none() && chip.as_ref().is_some_and(|c| c.size > 16 * 1024 * 1024);
+    let address_mode = args.address_mode.unwrap_or(if auto_4byte { 4 } else { 3 });
+    if args.address_mode.is_some() || enter_4byte.is_some() || auto_4byte {
+        if let Err(e) = session
+            .set_address_mode(address_mode, enter_4byte.unwrap_or(false))
+            .await
+        {
             eprintln!("Error: {}", e);
             std::process::exit(1);
         }
-        println!("Enabled {} byte address mode", mode);
+        println!("Enabled {} byte address mode", address_mode);
+        if enter_4byte == Some(true) {
+            println!("Enabled entry into 4 byte address mode");
+        }
     }
 
     // Set voltage (obsolete)
@@ -451,7 +523,10 @@ async fn run(args: Args) {
 
     // Upload from device
     if let Some(upload_file) = &args.upload {
-        let maxlen = chip.as_ref().map(|c| c.size as usize).unwrap_or(0x4000000);
+        let maxlen = session
+            .device_mut()
+            .emulation_size(chip.as_ref(), chip_db.as_ref())
+            .await;
 
         match read_memory_with_progress(&mut session, 0, maxlen).await {
             Ok(data) => {
@@ -488,7 +563,15 @@ async fn run(args: Args) {
 
         let maxlen = chip.as_ref().map(|c| c.size as usize).unwrap_or(0x4000000);
 
-        let mut file = match File::open(download_file) {
+        if (spi_start_address as usize) > maxlen {
+            eprintln!(
+                "FATAL: start address 0x{:08x} is beyond the {} byte emulation buffer.",
+                spi_start_address, maxlen
+            );
+            std::process::exit(1);
+        }
+
+        let file = match File::open(download_file) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("Can't open file '{}': {}", download_file, e);
@@ -496,8 +579,11 @@ async fn run(args: Args) {
             }
         };
 
+        // Read at most one byte past the chip size: enough to detect an
+        // oversized image (C stops reading at maxlen) without
+        // allocating unboundedly for huge files.
         let mut data = Vec::new();
-        if let Err(e) = file.read_to_end(&mut data) {
+        if let Err(e) = file.take(maxlen as u64 + 1).read_to_end(&mut data) {
             eprintln!("Error reading file: {}", e);
             std::process::exit(1);
         }
@@ -508,13 +594,33 @@ async fn run(args: Args) {
         }
 
         if data.len() > maxlen {
-            eprintln!("FATAL: file size exceeds maximum");
-            std::process::exit(1);
+            if !args.truncate {
+                println!("Warning: image is larger than the chip");
+            }
+            data.truncate(maxlen);
         }
 
-        // When a chip is specified, validate that file size matches expected size
+        let fill_value = match &args.fill {
+            Some(s) => match parse_hex(s) {
+                Some(v) if v <= 0xff => Some(v as u8),
+                _ => {
+                    eprintln!("Invalid fill byte: {}", s);
+                    std::process::exit(1);
+                }
+            },
+            None => None,
+        };
+
+        // When a chip is specified, pad a short image or validate the size
         if chip.is_some() {
             let expected_size = maxlen - spi_start_address as usize;
+            if let Some(fill) = fill_value {
+                if data.len() < expected_size {
+                    let pad = expected_size - data.len();
+                    println!("Filling the remaining {} bytes with 0x{:02x}", pad, fill);
+                    data.resize(expected_size, fill);
+                }
+            }
             if data.len() != expected_size {
                 eprintln!(
                     "FATAL: file size ({}) does not match chip size minus start address ({}).",
@@ -544,6 +650,14 @@ async fn run(args: Args) {
                             eprintln!("Download error: {}", e);
                             std::process::exit(1);
                         }
+                    } else {
+                        eprintln!(
+                            "FATAL: image does not fit: start address 0x{:08x} plus file size {} exceeds the {} byte emulation buffer.",
+                            spi_start_address,
+                            data.len(),
+                            existing.len()
+                        );
+                        std::process::exit(1);
                     }
                 }
                 Err(e) => {
@@ -575,6 +689,44 @@ async fn run(args: Args) {
         }
     }
 
+    // Deliberately ordered after downloading, unlike em100: a single
+    // invocation verifies the image just written instead of the old
+    // contents. The erase-then-confirm workflow needs separate runs.
+    if args.blank_check {
+        let length = session
+            .device_mut()
+            .emulation_size(chip.as_ref(), chip_db.as_ref())
+            .await;
+        if let Err(e) = session.device_mut().blank_check(length).await {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    if args.checksum {
+        let length = session
+            .device_mut()
+            .emulation_size(chip.as_ref(), chip_db.as_ref())
+            .await;
+        if let Err(e) = session.device_mut().checksum(length).await {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    // The Windows tool resets the target before starting emulation
+    if let Some(ms) = args.reset {
+        if !(1..=10000).contains(&ms) {
+            eprintln!("Reset time must be between 1 and 10000 ms");
+            std::process::exit(1);
+        }
+        if let Err(e) = session.device_mut().reset_target(ms).await {
+            eprintln!("Error: Failed to reset the target: {}", e);
+            std::process::exit(1);
+        }
+        println!("Pulsed the target reset line for {} ms", ms);
+    }
+
     // Start emulation
     if args.start {
         if let Err(e) = session.set_emulation_state(true).await {
@@ -588,8 +740,23 @@ async fn run(args: Args) {
     if args.trace || args.terminal || args.traceconsole {
         const MAX_USB_ERRORS: u32 = 10;
 
-        // Set hold pin to input if not explicitly set
-        if args.holdpin.is_none() {
+        // Let the target drive the hold pin while tracing, but only if it is
+        // floating, meaning nothing has asked for a particular state. Any
+        // other state was set deliberately, and boards with their own flash
+        // chip on the bus need it held low throughout, or they do not boot.
+        let take_over_hold_pin = if args.holdpin.is_none() {
+            match session.device_mut().get_hold_pin_state().await {
+                Ok(HoldPinState::Float) => true,
+                Ok(_) => false,
+                Err(e) => {
+                    eprintln!("Error: Failed to read the hold pin state: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            false
+        };
+        if take_over_hold_pin {
             if let Err(e) = session.set_hold_pin(HoldPinState::Input).await {
                 eprintln!("Error: Failed to set EM100 to input: {}", e);
                 std::process::exit(1);
@@ -628,6 +795,46 @@ async fn run(args: Args) {
         // the chip default, so decode with the same width instead of assuming
         // the 3-byte default.
         let mut trace_state = TraceState::new(args.brief, session.state().address_mode());
+
+        if let Some(filter) = &args.trace_filter {
+            let cmds: Option<Vec<u8>> = filter
+                .split(',')
+                .map(|part| {
+                    parse_hex_strict(part)
+                        .filter(|&cmd| cmd <= 0xff)
+                        .map(|cmd| cmd as u8)
+                })
+                .collect();
+            match cmds {
+                Some(cmds) => {
+                    for cmd in cmds {
+                        trace_state.filter_command(cmd);
+                    }
+                }
+                None => {
+                    eprintln!("Invalid trace filter: {}", filter);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        if let Some(range) = &args.trace_range {
+            let parts: Vec<&str> = range.split(':').collect();
+            let valid = match parts.as_slice() {
+                [start, end] => match (parse_hex_strict(start), parse_hex_strict(end)) {
+                    (Some(start), Some(end)) if end >= start => {
+                        trace_state.filter_address(start, end);
+                        true
+                    }
+                    _ => false,
+                },
+                _ => false,
+            };
+            if !valid {
+                eprintln!("Invalid trace range: {}", range);
+                std::process::exit(1);
+            }
+        }
 
         let mut usb_errors = 0u32;
 
@@ -674,8 +881,8 @@ async fn run(args: Args) {
             session.reset_spi_trace().await.ok();
         }
 
-        // Reset hold pin to float
-        if args.holdpin.is_none() {
+        // Put the hold pin back only if it was taken over above
+        if take_over_hold_pin {
             if let Err(e) = session.set_hold_pin(HoldPinState::Float).await {
                 eprintln!("Error: Failed to set EM100 to float: {}", e);
             }

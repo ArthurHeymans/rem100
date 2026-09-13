@@ -121,8 +121,11 @@ impl DeviceSession {
         self.configure_chip(chip).await
     }
 
-    pub async fn set_address_mode(&mut self, mode: u8) -> Result<()> {
-        self.device.set_address_mode(mode).await?;
+    /// Set the address mode, optionally allowing the target to enter 4-byte
+    /// addressing on its own (device register bit shared with the default
+    /// address length).
+    pub async fn set_address_mode(&mut self, mode: u8, enter_4byte: bool) -> Result<()> {
+        self.device.set_address_mode(mode, enter_4byte).await?;
         self.state.address_mode = mode;
         Ok(())
     }

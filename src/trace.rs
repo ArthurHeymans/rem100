@@ -303,6 +303,25 @@ pub struct TraceState {
     timestamp: u64,
     start_timestamp: u64,
     brief: bool,
+    /// Show only these SPI commands when set
+    cmd_filter: [bool; 256],
+    have_cmd_filter: bool,
+    /// Show only accesses within this address range when set
+    addr_start: u64,
+    addr_end: u64,
+    have_addr_filter: bool,
+    /// The current command is decoded for bookkeeping but not printed
+    skipping: bool,
+    /// Console mode prints payload of page-program records; set by a 0x02
+    /// record and kept across report batches like the C static.
+    /// Only read by the native-gated console path.
+    #[allow(dead_code)]
+    console_do_write: bool,
+    /// Address type of the command currently being decoded. Set once per
+    /// command header and reused for continuation records, whose payload
+    /// bytes sit where the opcode was: re-decoding per record (as was
+    /// done) mislabels multi-record commands, unlike the C static.
+    cur_addr_type: AddressType,
 }
 
 /// A decoded trace event. Output fragments preserve the CLI's streaming format.
@@ -340,6 +359,14 @@ impl Default for TraceState {
             timestamp: 0,
             start_timestamp: 0,
             brief: false,
+            cmd_filter: [false; 256],
+            have_cmd_filter: false,
+            addr_start: 0,
+            addr_end: 0,
+            have_addr_filter: false,
+            skipping: false,
+            console_do_write: false,
+            cur_addr_type: AddressType::None,
         }
     }
 }
@@ -351,6 +378,38 @@ impl TraceState {
             address_mode,
             ..Default::default()
         }
+    }
+
+    /// Only show these SPI commands in the trace output.
+    ///
+    /// Filtering happens on the host: the EM100 captures everything and
+    /// non-matching commands are still decoded, so address and length
+    /// bookkeeping stays correct; they are simply not printed.
+    pub fn filter_command(&mut self, cmd: u8) {
+        self.cmd_filter[cmd as usize] = true;
+        self.have_cmd_filter = true;
+    }
+
+    /// Only show accesses with an address in `start..=end`.
+    pub fn filter_address(&mut self, start: u64, end: u64) {
+        self.addr_start = start;
+        self.addr_end = end;
+        self.have_addr_filter = true;
+    }
+
+    fn shows(&self, cmd: u8, address: u64, has_address: bool) -> bool {
+        if self.have_cmd_filter && !self.cmd_filter[cmd as usize] {
+            return false;
+        }
+        if self.have_addr_filter {
+            if !has_address {
+                return false;
+            }
+            if address < self.addr_start || address > self.addr_end {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -395,7 +454,12 @@ pub fn decode_spi_trace_reports(
             )));
         }
 
-        let count = (((data[0] as usize) << 8) | data[1] as usize).min(1023);
+        let raw_count = ((data[0] as usize) << 8) | (data[1] as usize);
+        #[cfg(not(target_arch = "wasm32"))]
+        if raw_count > 1023 {
+            eprintln!("Warning: EM100pro sends too much data.");
+        }
+        let count = raw_count.min(1023);
         for i in 0..count {
             let mut j = state.additional_pad_bytes;
             state.additional_pad_bytes = 0;
@@ -456,28 +520,40 @@ pub fn decode_spi_trace_reports(
                     j = MAX_TRACE_BLOCKLENGTH;
                 }
 
-                let output = if state.brief {
+                state.skipping = !state.shows(
+                    spi_command,
+                    state.address,
+                    spi_cmd_vals.address_type != AddressType::None,
+                );
+                state.cur_addr_type = spi_cmd_vals.address_type;
+
+                if state.brief {
                     state.start_timestamp = 0;
-                    if spi_cmd_vals.address_type != AddressType::None {
-                        format!(
-                            "0x{spi_command:02x} @ 0x{:08x} ({})\n",
-                            state.address, spi_cmd_vals.name
-                        )
-                    } else {
-                        format!("0x{spi_command:02x} ({})\n", spi_cmd_vals.name)
-                    }
                 } else {
                     state.counter += 1;
-                    let rel_time = state.timestamp.saturating_sub(state.start_timestamp);
-                    format!(
-                        "\nTime: {:06}.{:08} command # {:<6} : 0x{spi_command:02x} - {}",
-                        rel_time / 100000000,
-                        rel_time % 100000000,
-                        state.counter,
-                        spi_cmd_vals.name
-                    )
-                };
-                events.push(TraceEvent::Output(output));
+                }
+                if !state.skipping {
+                    let output = if state.brief {
+                        if spi_cmd_vals.address_type != AddressType::None {
+                            format!(
+                                "0x{spi_command:02x} @ 0x{:08x} ({})\n",
+                                state.address, spi_cmd_vals.name
+                            )
+                        } else {
+                            format!("0x{spi_command:02x} ({})\n", spi_cmd_vals.name)
+                        }
+                    } else {
+                        let rel_time = state.timestamp.saturating_sub(state.start_timestamp);
+                        format!(
+                            "\nTime: {:06}.{:08} command # {:<6} : 0x{spi_command:02x} - {}",
+                            rel_time / 100000000,
+                            rel_time % 100000000,
+                            state.counter,
+                            spi_cmd_vals.name
+                        )
+                    };
+                    events.push(TraceEvent::Output(output));
+                }
                 state.curpos = 0;
                 state.outbytes = 0;
             }
@@ -490,12 +566,11 @@ pub fn decode_spi_trace_reports(
                 let payload_start = i * 8 + 4;
                 let blocklen = ((data[2 + i * 8 + 1].wrapping_sub(state.curpos)) / 8) as usize;
                 let blocklen = blocklen.min(data.len() - payload_start);
-                let spi_cmd_vals = get_command_vals(data[i * 8 + 4]);
                 let mut output = String::new();
 
                 while j < blocklen {
-                    if state.outbytes == 0 {
-                        match spi_cmd_vals.address_type {
+                    if state.outbytes == 0 && !state.skipping {
+                        match state.cur_addr_type {
                             AddressType::Dynamic | AddressType::Addr3B | AddressType::Addr4B => {
                                 output
                                     .push_str(&format!("\n{:08x} : ", addr_offset + state.address));
@@ -506,7 +581,9 @@ pub fn decode_spi_trace_reports(
                             AddressType::None => output.push_str("\n         : "),
                         }
                     }
-                    output.push_str(&format!("{:02x} ", data[payload_start + j]));
+                    if !state.skipping {
+                        output.push_str(&format!("{:02x} ", data[payload_start + j]));
+                    }
                     state.outbytes += 1;
                     if state.outbytes == 16 {
                         state.outbytes = 0;
@@ -663,18 +740,22 @@ pub async fn read_spi_terminal(em100: &mut Em100, show_counter: bool) -> Result<
 }
 
 /// Initialize SPI terminal
+///
+/// Replicates the Windows software: select the SPI command carrying terminal
+/// data (FPGA register 0x82), then route terminal data over USB by writing
+/// FPGA registers 0x81 and 0x83. The Windows tool never writes any of the HT
+/// registers here, which is what the old code did, and which received nothing.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn init_spi_terminal(em100: &mut Em100) -> Result<()> {
-    spi::write_ht_register(em100, spi::HtRegister::UfifoDataFmt, 0).await?;
-    spi::write_ht_register(em100, spi::HtRegister::Status, spi::START_SPI_EMULATION).await?;
-
-    // Set EM100 to recognize SPI command 0x11
+    // Tell the EM100 which SPI command carries terminal data
     fpga::write_fpga_register(
         em100,
         Register::SPI_COMMAND.address(),
         EM100_SPECIFIC_CMD as u16,
     )
     .await?;
+    fpga::write_fpga_register(em100, Register::TERMINAL_CTRL_81.address(), 0).await?;
+    fpga::write_fpga_register(em100, Register::TERMINAL_CTRL_83.address(), 0).await?;
     let _ = fpga::read_fpga_register(em100, Register::EMULATION_STATE.address()).await?;
 
     Ok(())
@@ -706,9 +787,11 @@ pub async fn read_spi_trace_console(
         if count == 0 {
             continue;
         }
-        let count = count.min(1023);
-
-        let mut do_write = false;
+        let raw_count = count;
+        if raw_count > 1023 {
+            eprintln!("Warning: EM100pro sends too much data: {}.", raw_count);
+        }
+        let count = raw_count.min(1023);
 
         for i in 0..count {
             let mut j = state.additional_pad_bytes;
@@ -756,11 +839,12 @@ pub async fn read_spi_trace_console(
                 }
 
                 state.curpos = 0;
-                do_write = spi_command == 0x02;
+                state.console_do_write = spi_command == 0x02;
+                state.cur_addr_type = spi_cmd_vals.address_type;
             }
 
-            if !do_write
-                || spi_cmd_vals_address_type(data[i * 8 + 4]) == AddressType::None
+            if !state.console_do_write
+                || state.cur_addr_type == AddressType::None
                 || state.address < addr_offset
                 || state.address > addr_offset + addr_len
             {
@@ -783,11 +867,6 @@ pub async fn read_spi_trace_console(
     }
 
     Ok(true)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn spi_cmd_vals_address_type(cmd: u8) -> AddressType {
-    get_command_vals(cmd).address_type
 }
 
 #[cfg(test)]
@@ -842,6 +921,67 @@ mod tests {
                 "0x03 @ 0x12345678 (read)\n".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn trace_filter_hides_unlisted_commands() {
+        let read = report_with_record([1, 0, 0x03, 0x12, 0x34, 0x56, 0, 0]);
+        let mut state = TraceState::new(true, 3);
+        state.filter_command(0x9f);
+        let events = decode_spi_trace_reports(&[read], &mut state, 0).unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn trace_filter_shows_listed_commands() {
+        let read = report_with_record([1, 0, 0x03, 0x12, 0x34, 0x56, 0, 0]);
+        let mut state = TraceState::new(true, 3);
+        state.filter_command(0x03);
+        let events = decode_spi_trace_reports(&[read], &mut state, 0).unwrap();
+        assert_eq!(
+            events,
+            vec![TraceEvent::Output("0x03 @ 0x00123456 (read)\n".to_string())]
+        );
+    }
+
+    #[test]
+    fn trace_address_range_filters_by_address() {
+        let read = report_with_record([1, 0, 0x03, 0x12, 0x34, 0x56, 0, 0]);
+        let mut state = TraceState::new(true, 3);
+        state.filter_address(0x200000, 0x300000);
+        let events = decode_spi_trace_reports(&[read], &mut state, 0).unwrap();
+        assert!(events.is_empty());
+
+        let mut state = TraceState::new(true, 3);
+        state.filter_address(0x100000, 0x200000);
+        let read = report_with_record([1, 0, 0x03, 0x12, 0x34, 0x56, 0, 0]);
+        let events = decode_spi_trace_reports(&[read], &mut state, 0).unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn continuation_records_reuse_header_command_type() {
+        // One 0x03 (read) command split over two records. The second
+        // record's opcode slot carries payload (0x05, itself a status
+        // read opcode) instead of the command.
+        let mut report = vec![0; REPORT_BUFFER_LENGTH];
+        report[0..2].copy_from_slice(&[0x00, 0x02]);
+        report[2..10].copy_from_slice(&[1, 0x40, 0x03, 0x12, 0x34, 0x56, 0xAA, 0xBB]);
+        report[10..18].copy_from_slice(&[1, 0xD0, 0x05, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE]);
+
+        let events = decode_spi_trace_reports(&[report], &mut TraceState::default(), 0).unwrap();
+        let output: String = events
+            .into_iter()
+            .filter_map(|event| match event {
+                TraceEvent::Output(output) => Some(output),
+                TraceEvent::Timestamp => None,
+            })
+            .collect();
+
+        // The continuation payload is labeled with the running address,
+        // not as an address-less command.
+        assert!(output.contains("00123466 : "), "output was: {output}");
+        assert!(!output.contains("         : "), "output was: {output}");
     }
 
     #[test]
