@@ -62,7 +62,7 @@ jobs:
         with:
           key: wasm32-unknown-unknown
 
-      - uses: taiki-e/install-action@v2.85.2
+      - uses: taiki-e/install-action@v2.87.2
         with:
           tool: trunk
 
