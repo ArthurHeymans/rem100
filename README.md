@@ -107,6 +107,11 @@ Example:
 rem100 --stop --set M25P80 -d file.bin -v --start -t -O 0xfff00000
 ```
 
+`--set` stops emulation before chip configuration. `--download` stops
+emulation before writing the image, so the target never observes a
+half-configured chip or a partially written image. Pass `--start` to resume
+emulation afterwards.
+
 ### Command-line options
 
 ```
