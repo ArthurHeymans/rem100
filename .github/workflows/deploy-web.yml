@@ -20,7 +20,7 @@ jobs:
           persist-credentials: false
 
       - uses: DeterminateSystems/nix-installer-action@v22
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
 
       - name: Build WASM with Trunk
         run: nix develop --command trunk build --release
