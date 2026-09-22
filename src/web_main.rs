@@ -470,18 +470,14 @@ mod wasm_app {
                     );
                     return;
                 }
-                if s.device_state().is_running() != Some(true) {
-                    s.async_op =
-                        AsyncOp::Error("Start emulation before starting trace capture".to_string());
-                    return;
-                }
                 if s.trace_active {
                     return;
                 }
+                // Reserve the session while checking hardware, but don't mark
+                // trace capture active until the device confirms it is running.
                 s.trace_generation = s.trace_generation.wrapping_add(1);
-                s.trace_running = true;
-                s.trace_active = true;
-                s.async_op = AsyncOp::InProgress("Starting SPI trace capture...".to_string());
+                s.device_op_active = true;
+                s.async_op = AsyncOp::InProgress("Checking emulation state...".to_string());
                 s.trace_generation
             };
 
@@ -490,6 +486,42 @@ mod wasm_app {
             let brief = self.trace_brief;
             let address_mode = self.state.borrow().device_state().address_mode();
             spawn_local(async move {
+                let mut device = state.borrow_mut().device.take();
+                let running = match device.as_mut() {
+                    Some(device) => device.refresh_emulation_state().await,
+                    None => Err(em100::Error::DeviceNotFound),
+                };
+                {
+                    let mut s = state.borrow_mut();
+                    if s.trace_generation != generation {
+                        repaint.request_repaint();
+                        return;
+                    }
+                    s.restore_device(device);
+                    match running {
+                        Ok(true) => {
+                            s.trace_running = true;
+                            s.trace_active = true;
+                            s.async_op =
+                                AsyncOp::InProgress("Starting SPI trace capture...".to_string());
+                        }
+                        Ok(false) => {
+                            s.async_op = AsyncOp::Error(
+                                "Start emulation before starting trace capture".to_string(),
+                            );
+                            repaint.request_repaint();
+                            return;
+                        }
+                        Err(error) => {
+                            s.async_op = AsyncOp::Error(format!(
+                                "Could not confirm emulation state: {error}"
+                            ));
+                            repaint.request_repaint();
+                            return;
+                        }
+                    }
+                }
+
                 let mut device = state.borrow_mut().device.take();
                 let reset_result = match device.as_mut() {
                     Some(device) => device.reset_spi_trace().await,

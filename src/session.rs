@@ -136,6 +136,13 @@ impl DeviceSession {
         Ok(())
     }
 
+    /// Refresh the cached state from hardware, leaving it unknown if the read fails.
+    pub async fn refresh_emulation_state(&mut self) -> Result<bool> {
+        let running = self.device.get_state().await;
+        self.state.is_running = running.as_ref().ok().copied();
+        running
+    }
+
     pub async fn set_hold_pin(&mut self, state: HoldPinState) -> Result<()> {
         self.device.set_hold_pin_state(state).await?;
         self.state.hold_pin_state = Some(state);
