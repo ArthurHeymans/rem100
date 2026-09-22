@@ -205,6 +205,10 @@ pub struct FirmwareInfo {
 fn validate_firmware_ranges(fw: &[u8], info: &FirmwareInfo) -> Result<()> {
     let valid = info.fpga_len >= 256
         && info.mcu_len >= 256
+        && info.fpga_offset >= 0x100
+        && info.fpga_offset
+            .checked_add(info.fpga_len)
+            .is_some_and(|end| end <= info.mcu_offset)
         && info.fpga_len <= 0x100000
         // MCU starts at 0x100100; sector 0x1f contains the secret key and serial.
         && info.mcu_len <= 0xeff00
@@ -539,9 +543,9 @@ mod tests {
         FirmwareInfo {
             mcu_version: String::new(),
             fpga_version: String::new(),
-            fpga_offset: 0,
+            fpga_offset: 0x100,
             fpga_len: 256,
-            mcu_offset: 256,
+            mcu_offset: 0x200,
             mcu_len: 256,
         }
     }
@@ -555,11 +559,17 @@ mod tests {
 
     #[test]
     fn firmware_components_must_fit_before_erasing() {
-        assert!(validate_firmware_ranges(&[0; 512], &info()).is_ok());
-        assert!(validate_firmware_ranges(&[0; 511], &info()).is_err());
+        assert!(validate_firmware_ranges(&[0; 768], &info()).is_ok());
+        assert!(validate_firmware_ranges(&[0; 767], &info()).is_err());
         let mut invalid = info();
         invalid.fpga_offset = usize::MAX;
-        assert!(validate_firmware_ranges(&[0; 512], &invalid).is_err());
+        assert!(validate_firmware_ranges(&[0; 768], &invalid).is_err());
+        invalid = info();
+        invalid.fpga_offset = 0;
+        assert!(validate_firmware_ranges(&[0; 768], &invalid).is_err());
+        invalid = info();
+        invalid.mcu_offset = 0x180;
+        assert!(validate_firmware_ranges(&[0; 768], &invalid).is_err());
         invalid = info();
         invalid.mcu_len = 0xf0000;
         assert!(validate_firmware_ranges(&vec![0; 0xf0200], &invalid).is_err());

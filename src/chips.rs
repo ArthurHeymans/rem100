@@ -328,13 +328,12 @@ impl ChipDatabase {
         )
     }
 
-    /// Create chip database from in-memory data.
+    /// Create chip database from in-memory data, skipping invalid entries.
     pub fn from_data(chip_configs: Vec<(&str, &[u8])>, version: String) -> Result<Self> {
-        let chips = chip_configs
-            .into_iter()
-            .map(|(_, data)| parse_dcfg(data))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Self::from_parsed_chips(chips, version))
+        Ok(Self::from_lenient_data(
+            chip_configs.into_iter().map(|(_, data)| data),
+            version,
+        ))
     }
 
     /// Find a chip by name.
@@ -400,8 +399,9 @@ mod tests {
     }
 
     #[test]
-    fn in_memory_database_reports_invalid_configs() {
-        assert!(ChipDatabase::from_data(vec![("bad.cfg", &[0; 4])], "test".into()).is_err());
+    fn in_memory_database_skips_invalid_configs() {
+        let database = ChipDatabase::from_data(vec![("bad.cfg", &[0; 4])], "test".into()).unwrap();
+        assert!(database.chips.is_empty());
     }
 
     #[test]
