@@ -192,7 +192,9 @@ fn parse_hex(s: &str) -> Option<u64> {
     }
 }
 
-fn parse_device(s: &str) -> Result<(Option<u8>, Option<u8>, Option<u32>), String> {
+type DeviceSelection = (Option<u8>, Option<u8>, Option<u32>);
+
+fn parse_device(s: &str) -> Result<DeviceSelection, String> {
     let selection = s.to_ascii_uppercase();
     if let Some(serial) = selection
         .strip_prefix("DP")

@@ -277,6 +277,19 @@ pub struct ChipDatabase {
 include!(concat!(env!("OUT_DIR"), "/chip_data.rs"));
 
 impl ChipDatabase {
+    fn from_parsed_chips(mut chips: Vec<ChipDesc>, version: String) -> Self {
+        chips.sort_by(|a, b| a.vendor.cmp(&b.vendor).then(a.name.cmp(&b.name)));
+        Self { chips, version }
+    }
+
+    fn from_lenient_data<'a>(data: impl IntoIterator<Item = &'a [u8]>, version: String) -> Self {
+        let chips = data
+            .into_iter()
+            .filter_map(|data| parse_dcfg(data).ok())
+            .collect();
+        Self::from_parsed_chips(chips, version)
+    }
+
     /// Load chip database from configs.tar.xz.
     #[cfg(feature = "cli")]
     pub fn load() -> Result<Self> {
@@ -285,47 +298,32 @@ impl ChipDatabase {
 
         let version_data = configs.find("configs/VERSION")?;
         let version = String::from_utf8_lossy(&version_data).trim().to_string();
-        let mut chips = Vec::new();
-
-        for entry in configs.entries() {
-            if entry.ends_with(".cfg") {
-                if let Ok(data) = configs.find(entry) {
-                    if let Ok(chip) = parse_dcfg(&data) {
-                        chips.push(chip);
-                    }
-                }
-            }
-        }
-        chips.sort_by(|a, b| a.vendor.cmp(&b.vendor).then(a.name.cmp(&b.name)));
-
-        Ok(Self { chips, version })
+        let data: Vec<_> = configs
+            .entries()
+            .filter(|entry| entry.ends_with(".cfg"))
+            .filter_map(|entry| configs.find(entry).ok())
+            .collect();
+        Ok(Self::from_lenient_data(
+            data.iter().map(Vec::as_slice),
+            version,
+        ))
     }
 
     /// Load chip database from embedded data.
     pub fn load_embedded() -> Self {
-        let mut chips = Vec::new();
-        for (_name, data) in EMBEDDED_CHIP_CONFIGS {
-            if let Ok(chip) = parse_dcfg(data) {
-                chips.push(chip);
-            }
-        }
-        chips.sort_by(|a, b| a.vendor.cmp(&b.vendor).then(a.name.cmp(&b.name)));
-
-        Self {
-            chips,
-            version: "embedded".to_string(),
-        }
+        Self::from_lenient_data(
+            EMBEDDED_CHIP_CONFIGS.iter().map(|(_, data)| *data),
+            "embedded".to_string(),
+        )
     }
 
     /// Create chip database from in-memory data.
     pub fn from_data(chip_configs: Vec<(&str, &[u8])>, version: String) -> Result<Self> {
-        let mut chips = Vec::new();
-        for (_name, data) in chip_configs {
-            if let Ok(chip) = parse_dcfg(data) {
-                chips.push(chip);
-            }
-        }
-        Ok(Self { chips, version })
+        let chips = chip_configs
+            .into_iter()
+            .map(|(_, data)| parse_dcfg(data))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self::from_parsed_chips(chips, version))
     }
 
     /// Find a chip by name.
@@ -366,7 +364,12 @@ pub fn get_em100_file(name: &str) -> Result<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::ChipDesc;
+    use super::{ChipDatabase, ChipDesc};
+
+    #[test]
+    fn in_memory_database_reports_invalid_configs() {
+        assert!(ChipDatabase::from_data(vec![("bad.cfg", &[0; 4])], "test".into()).is_err());
+    }
 
     #[test]
     fn init_register_value_finds_fpga_writes() {
