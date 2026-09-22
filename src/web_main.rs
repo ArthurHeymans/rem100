@@ -470,6 +470,11 @@ mod wasm_app {
                     );
                     return;
                 }
+                if s.device_state().is_running() != Some(true) {
+                    s.async_op =
+                        AsyncOp::Error("Start emulation before starting trace capture".to_string());
+                    return;
+                }
                 if s.trace_active {
                     return;
                 }
