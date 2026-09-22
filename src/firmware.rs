@@ -478,6 +478,17 @@ pub async fn firmware_update(em100: &mut Em100, filename: &str, verify: bool) ->
     Ok(())
 }
 
+/// Versions in the bundle are `MCU-major.minor_FPGA-major.minor`.
+#[cfg(feature = "cli")]
+fn firmware_version(name: &str) -> Option<[u32; 4]> {
+    let parts: Vec<u32> = name
+        .split(['_', '.'])
+        .map(str::parse)
+        .collect::<std::result::Result<_, _>>()
+        .ok()?;
+    parts.try_into().ok()
+}
+
 #[cfg(feature = "cli")]
 fn load_auto_firmware(em100: &Em100) -> Result<Vec<u8>> {
     let firmware_path = get_em100_file("firmware.tar.xz")?;
@@ -502,24 +513,26 @@ fn load_auto_firmware(em100: &Em100) -> Result<Vec<u8>> {
         "3.3V"
     };
 
-    // Find the latest firmware file that matches
-    let mut selected: Option<(String, Vec<u8>)> = None;
-    for entry in tar.entries() {
-        if entry.starts_with(firmware_prefix) && entry.contains(voltage_suffix) {
-            if let Ok(data) = tar.find(entry) {
-                println!("select {}", entry);
-                selected = Some((entry.to_string(), data));
-            }
-        }
-    }
-
-    selected.map(|(_, data)| data).ok_or_else(|| {
-        Error::InvalidFirmware("Could not find suitable firmware for autoupdate".to_string())
-    })
+    let selected = tar
+        .entries()
+        .filter_map(|entry| {
+            let version = entry.strip_prefix(firmware_prefix)?;
+            let version = version.strip_suffix(&format!("_{voltage_suffix}.dpfw"))?;
+            Some((firmware_version(version)?, entry))
+        })
+        .max_by_key(|(version, _)| *version)
+        .map(|(_, entry)| entry)
+        .ok_or_else(|| {
+            Error::InvalidFirmware("Could not find suitable firmware for autoupdate".to_string())
+        })?;
+    println!("select {selected}");
+    tar.find(selected)
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "cli")]
+    use super::firmware_version;
     use super::{FirmwareInfo, validate_firmware_ranges};
 
     fn info() -> FirmwareInfo {
@@ -531,6 +544,13 @@ mod tests {
             mcu_offset: 256,
             mcu_len: 256,
         }
+    }
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn firmware_versions_sort_numerically() {
+        assert!(firmware_version("2.10_0.1") > firmware_version("2.9_9.99"));
+        assert_eq!(firmware_version("invalid"), None);
     }
 
     #[test]
