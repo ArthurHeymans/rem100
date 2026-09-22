@@ -4,6 +4,7 @@ use crate::chips::get_em100_file;
 use crate::error::{Error, Result};
 use std::fs::File;
 use std::io::{Read, Write};
+use std::time::Duration;
 
 /// Google Drive file IDs for updates
 const FIRMWARE_ID: &str = "1UmzGZbRkF9duwTLPi467EyfIZ6EhnMKA";
@@ -21,6 +22,7 @@ fn download_from_drive(id: &str, filename: &std::path::Path) -> Result<()> {
 
     let client = reqwest::blocking::Client::builder()
         .user_agent("em100-agent/1.0")
+        .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| Error::Network(e.to_string()))?;
 
@@ -37,8 +39,12 @@ fn download_from_drive(id: &str, filename: &std::path::Path) -> Result<()> {
         .bytes()
         .map_err(|e| Error::Network(e.to_string()))?;
 
-    let mut file = File::create(filename)?;
+    // A failed write must not replace a working local database or firmware.
+    let temporary = filename.with_extension("download-new");
+    let mut file = File::create(&temporary)?;
     file.write_all(&bytes)?;
+    file.sync_all()?;
+    std::fs::rename(temporary, filename)?;
 
     Ok(())
 }
