@@ -323,7 +323,7 @@ impl ChipDatabase {
     /// Load chip database from embedded data.
     pub fn load_embedded() -> Self {
         Self::from_lenient_data(
-            EMBEDDED_CHIP_CONFIGS.iter().map(|(_, data)| *data),
+            EMBEDDED_CHIP_CONFIGS.iter().copied(),
             "embedded".to_string(),
         )
     }
