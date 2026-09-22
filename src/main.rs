@@ -192,23 +192,23 @@ fn parse_hex(s: &str) -> Option<u64> {
     }
 }
 
-fn parse_device(s: &str) -> (Option<u8>, Option<u8>, Option<u32>) {
-    let s = s.to_uppercase();
-    if s.starts_with("DP") || s.starts_with("EM") {
-        // Serial number
-        if let Ok(serial) = s[2..].parse::<u32>() {
-            return (None, None, Some(serial));
-        }
-    } else if s.contains(':') {
-        // Bus:device
-        let parts: Vec<&str> = s.split(':').collect();
-        if parts.len() == 2 {
-            if let (Ok(bus), Ok(dev)) = (parts[0].parse::<u8>(), parts[1].parse::<u8>()) {
-                return (Some(bus), Some(dev), None);
-            }
+fn parse_device(s: &str) -> Result<(Option<u8>, Option<u8>, Option<u32>), String> {
+    let selection = s.to_ascii_uppercase();
+    if let Some(serial) = selection
+        .strip_prefix("DP")
+        .or_else(|| selection.strip_prefix("EM"))
+    {
+        return serial
+            .parse::<u32>()
+            .map(|serial| (None, None, Some(serial)))
+            .map_err(|_| format!("Invalid device selector: {s}"));
+    }
+    if let Some((bus, device)) = selection.split_once(':') {
+        if let (Ok(bus), Ok(device)) = (bus.parse::<u8>(), device.parse::<u8>()) {
+            return Ok((Some(bus), Some(device), None));
         }
     }
-    (None, None, None)
+    Err(format!("Invalid device selector: {s}"))
 }
 
 fn transfer_progress(length: usize) -> ProgressBar {
@@ -302,11 +302,13 @@ async fn run(args: Args) {
     }
 
     // Parse device selection
-    let (bus, device, serial) = args
-        .device
-        .as_ref()
-        .map(|d| parse_device(d))
-        .unwrap_or((None, None, None));
+    let (bus, device, serial) = match args.device.as_deref().map(parse_device).transpose() {
+        Ok(selection) => selection.unwrap_or((None, None, None)),
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
 
     // Open device
     let em100 = match Em100::open(bus, device, serial).await {
@@ -910,5 +912,19 @@ async fn run(args: Args) {
                 eprintln!("Error: Failed to set EM100 to float: {}", e);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_device;
+
+    #[test]
+    fn invalid_device_selection_never_falls_back_to_default_device() {
+        assert_eq!(parse_device("EM1234").unwrap(), (None, None, Some(1234)));
+        assert_eq!(parse_device("1:2").unwrap(), (Some(1), Some(2), None));
+        assert!(parse_device("EMbad").is_err());
+        assert!(parse_device("1:2:3").is_err());
+        assert!(parse_device("anything").is_err());
     }
 }
