@@ -126,7 +126,11 @@ pub fn parse_dcfg(data: &[u8]) -> Result<ChipDesc> {
     let mut reg_offset = INIT_SEQUENCE_REGISTER_OFFSET_0;
     let mut pos = init_offset;
 
-    while pos + 4 <= DEDIPROG_CFG_PRO_SIZE && init_len < NUM_INIT_ENTRIES {
+    while pos
+        .checked_add(4)
+        .is_some_and(|end| end <= DEDIPROG_CFG_PRO_SIZE)
+        && init_len < NUM_INIT_ENTRIES
+    {
         let value = LittleEndian::read_u16(&data[pos..pos + 2]);
         let reg = LittleEndian::read_u16(&data[pos + 2..pos + 4]);
 
@@ -136,7 +140,9 @@ pub fn parse_dcfg(data: &[u8]) -> Result<ChipDesc> {
             continue;
         }
 
-        let full_reg = reg + reg_offset;
+        let full_reg = reg.checked_add(reg_offset).ok_or_else(|| {
+            Error::InvalidConfig("Initialization register out of range".to_string())
+        })?;
 
         // Convert to big endian for output
         let be_value = value.to_be_bytes();
@@ -184,6 +190,11 @@ pub fn parse_dcfg(data: &[u8]) -> Result<ChipDesc> {
 }
 
 fn parse_sfdp(data: &[u8], chip: &mut ChipDesc, entries: usize) -> Result<usize> {
+    if entries >= NUM_INIT_ENTRIES {
+        return Err(Error::InvalidConfig(
+            "Too many initialization entries".to_string(),
+        ));
+    }
     if data.len() < DEDIPROG_CFG_PRO_SIZE_SFDP {
         return Err(Error::InvalidConfig("SFDP data too small".to_string()));
     }
@@ -364,7 +375,29 @@ pub fn get_em100_file(name: &str) -> Result<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChipDatabase, ChipDesc};
+    use super::{ChipDatabase, ChipDesc, parse_dcfg};
+
+    fn config() -> Vec<u8> {
+        let mut data = vec![0; 176];
+        data[..4].copy_from_slice(b"Dcfg");
+        data[4..8].copy_from_slice(&[1, 0, 1, 0]);
+        data[8..12].copy_from_slice(&128u32.to_le_bytes());
+        data
+    }
+
+    #[test]
+    fn malformed_initialization_cannot_panic() {
+        let mut data = config();
+        data[128..132].copy_from_slice(&[0, 0, 0xff, 0xff]);
+        assert!(parse_dcfg(&data).is_err());
+
+        let mut data = config();
+        for _ in 0..3 {
+            data.extend_from_slice(b"SFDP");
+            data.extend_from_slice(&[0; 256]);
+        }
+        assert!(parse_dcfg(&data).is_err());
+    }
 
     #[test]
     fn in_memory_database_reports_invalid_configs() {
