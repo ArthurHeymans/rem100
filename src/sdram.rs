@@ -7,6 +7,21 @@ use crate::usb;
 
 /// Transfer chunk size (2MB)
 const TRANSFER_LENGTH: usize = 0x200000;
+pub(crate) const MAX_EMULATION_SIZE: usize = 0x4000000;
+
+/// Reject memory ranges that overflow or exceed the supported SDRAM capacity.
+pub(crate) fn validate_memory_range(address: u32, length: usize, capacity: usize) -> Result<()> {
+    if (address as usize)
+        .checked_add(length)
+        .is_some_and(|end| end <= capacity && length <= u32::MAX as usize)
+    {
+        Ok(())
+    } else {
+        Err(Error::InvalidArgument(format!(
+            "Memory range 0x{address:08x} + {length} exceeds {capacity} bytes"
+        )))
+    }
+}
 
 /// Progress callback type for reporting transfer progress
 /// Arguments: (bytes_transferred, total_bytes)
@@ -19,6 +34,7 @@ pub async fn read_sdram_with_progress(
     length: usize,
     mut progress: ProgressCallback<'_>,
 ) -> Result<Vec<u8>> {
+    validate_memory_range(address, length, MAX_EMULATION_SIZE)?;
     usb::send_command(
         &mut em100.endpoint_out,
         command::read(address, length as u32),
@@ -67,6 +83,7 @@ pub async fn write_sdram_with_progress(
     mut progress: ProgressCallback<'_>,
 ) -> Result<()> {
     let length = data.len();
+    validate_memory_range(address, length, MAX_EMULATION_SIZE)?;
 
     usb::send_command(
         &mut em100.endpoint_out,

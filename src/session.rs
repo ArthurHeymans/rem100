@@ -9,8 +9,6 @@ use crate::device::{DeviceInfo, Em100, HoldPinState};
 use crate::error::{Error, Result};
 use crate::usb;
 
-const MAX_EMULATION_SIZE: usize = 0x4000000;
-
 /// Parse a decimal address or one prefixed with 0x, without lossy casts.
 pub fn parse_address(value: &str) -> Result<u32> {
     let value = value.trim();
@@ -23,20 +21,6 @@ pub fn parse_address(value: &str) -> Result<u32> {
         value.parse::<u32>()
     };
     parsed.map_err(|_| Error::InvalidArgument(format!("Invalid address: {value}")))
-}
-
-/// Reject addresses which wrap or extend past the emulated capacity.
-fn validate_memory_range(address: u32, length: usize, capacity: usize) -> Result<()> {
-    if (address as usize)
-        .checked_add(length)
-        .is_some_and(|end| end <= capacity && length <= u32::MAX as usize)
-    {
-        Ok(())
-    } else {
-        Err(Error::InvalidArgument(format!(
-            "Memory range 0x{address:08x} + {length} exceeds {capacity} bytes"
-        )))
-    }
 }
 
 #[cfg(test)]
@@ -58,7 +42,10 @@ mod tests {
         assert!(validate_memory_range(u32::MAX, 2, 0x4000000).is_err());
     }
 }
-use crate::sdram::{ProgressCallback, read_sdram_with_progress, write_sdram_with_progress};
+use crate::sdram::{
+    MAX_EMULATION_SIZE, ProgressCallback, read_sdram_with_progress, validate_memory_range,
+    write_sdram_with_progress,
+};
 
 /// Last device state known to the application.
 #[derive(Clone)]
