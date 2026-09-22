@@ -1100,8 +1100,6 @@ mod wasm_app {
                 let progress_message = state.progress_message.clone();
                 let is_busy = state.device_busy() || state.trace_active;
                 let download_data_len = state.download_data.as_ref().map(|d| d.len());
-                // Clone download data for save button (only when needed)
-                let download_data_for_save = state.download_data.clone();
                 drop(state);
 
                 // Upload to Device
@@ -1154,7 +1152,7 @@ mod wasm_app {
                     if let Some(len) = download_data_len {
                         ui.label(format!("{} bytes", len));
                         if ui.button("Save As...").clicked() {
-                            if let Some(ref data) = download_data_for_save {
+                            if let Some(data) = self.state.borrow().download_data.as_ref() {
                                 let filename = configured_chip
                                     .as_ref()
                                     .map(|c| format!("{}.bin", c.name))
