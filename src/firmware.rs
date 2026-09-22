@@ -79,6 +79,12 @@ pub fn firmware_to_dpfw(em100: &Em100, data: &[u8]) -> Result<Vec<u8>> {
         }
     };
 
+    if data.len() < 2 * MB {
+        return Err(Error::InvalidFirmware(
+            "Raw firmware is shorter than 2 MiB".to_string(),
+        ));
+    }
+
     // Find FPGA firmware end
     let all_ff = [0xffu8; 256];
     let mut fpga_size = 0;
@@ -96,7 +102,7 @@ pub fn firmware_to_dpfw(em100: &Em100, data: &[u8]) -> Result<Vec<u8>> {
 
     // Find MCU firmware end
     let mut mcu_size = 0;
-    for i in (0..0xfff00).step_by(0x100) {
+    for i in (0..0xeff00).step_by(0x100) {
         if data[0x100100 + i..0x100100 + i + 256] == all_ff {
             mcu_size = i;
             break;
@@ -175,14 +181,13 @@ pub async fn firmware_dump(
     .await?;
     pb.finish();
 
-    let mut file = File::create(filename)?;
-
-    if firmware_is_dpfw {
-        let dpfw_data = firmware_to_dpfw(em100, &data)?;
-        file.write_all(&dpfw_data)?;
+    let output = if firmware_is_dpfw {
+        firmware_to_dpfw(em100, &data)?
     } else {
-        file.write_all(&data)?;
-    }
+        data
+    };
+    let mut file = File::create(filename)?;
+    file.write_all(&output)?;
 
     Ok(())
 }
@@ -195,6 +200,27 @@ pub struct FirmwareInfo {
     pub fpga_len: usize,
     pub mcu_offset: usize,
     pub mcu_len: usize,
+}
+
+fn validate_firmware_ranges(fw: &[u8], info: &FirmwareInfo) -> Result<()> {
+    let valid = info.fpga_len >= 256
+        && info.mcu_len >= 256
+        && info.fpga_len <= 0x100000
+        // MCU starts at 0x100100; sector 0x1f contains the secret key and serial.
+        && info.mcu_len <= 0xeff00
+        && [
+            (info.fpga_offset, info.fpga_len),
+            (info.mcu_offset, info.mcu_len),
+        ]
+        .into_iter()
+        .all(|(offset, len)| offset.checked_add(len).and_then(|end| fw.get(offset..end)).is_some());
+    if valid {
+        Ok(())
+    } else {
+        Err(Error::InvalidFirmware(
+            "Firmware file not valid.".to_string(),
+        ))
+    }
 }
 
 /// Validate and parse firmware file
@@ -232,20 +258,16 @@ pub fn validate_firmware(em100: &Em100, fw: &[u8]) -> Result<FirmwareInfo> {
         .trim_end_matches('\0')
         .to_string();
 
-    if fpga_len < 256 || mcu_len < 256 || fpga_len > 0x100000 || mcu_len > 0xf0000 {
-        return Err(Error::InvalidFirmware(
-            "Firmware file not valid.".to_string(),
-        ));
-    }
-
-    Ok(FirmwareInfo {
+    let info = FirmwareInfo {
         mcu_version,
         fpga_version,
         fpga_offset,
         fpga_len,
         mcu_offset,
         mcu_len,
-    })
+    };
+    validate_firmware_ranges(fw, &info)?;
+    Ok(info)
 }
 
 /// Write firmware to device (core function)
@@ -256,6 +278,9 @@ pub async fn firmware_write(
     verify: bool,
     mut progress: FirmwareProgressCallback<'_>,
 ) -> Result<()> {
+    // Public callers can provide FirmwareInfo directly. Never erase before
+    // confirming that every source slice and destination page is valid.
+    validate_firmware_ranges(fw, info)?;
     // Unlock and erase
     spi::unlock_spi_flash(em100).await?;
     spi::get_spi_flash_id(em100).await?;
@@ -491,4 +516,32 @@ fn load_auto_firmware(em100: &Em100) -> Result<Vec<u8>> {
     selected.map(|(_, data)| data).ok_or_else(|| {
         Error::InvalidFirmware("Could not find suitable firmware for autoupdate".to_string())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FirmwareInfo, validate_firmware_ranges};
+
+    fn info() -> FirmwareInfo {
+        FirmwareInfo {
+            mcu_version: String::new(),
+            fpga_version: String::new(),
+            fpga_offset: 0,
+            fpga_len: 256,
+            mcu_offset: 256,
+            mcu_len: 256,
+        }
+    }
+
+    #[test]
+    fn firmware_components_must_fit_before_erasing() {
+        assert!(validate_firmware_ranges(&[0; 512], &info()).is_ok());
+        assert!(validate_firmware_ranges(&[0; 511], &info()).is_err());
+        let mut invalid = info();
+        invalid.fpga_offset = usize::MAX;
+        assert!(validate_firmware_ranges(&[0; 512], &invalid).is_err());
+        invalid = info();
+        invalid.mcu_len = 0xf0000;
+        assert!(validate_firmware_ranges(&vec![0; 0xf0200], &invalid).is_err());
+    }
 }
