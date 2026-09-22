@@ -12,7 +12,7 @@ mod wasm_app {
     use egui::Color32;
     use em100::chips::{ChipDatabase, ChipDesc};
     use em100::device::{Em100, HoldPinState};
-    use em100::session::{DeviceSession, DeviceState};
+    use em100::session::{DeviceSession, DeviceState, parse_address};
     use em100::trace::{TraceEvent, TraceState, decode_spi_trace_reports, trace_display_tail};
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -654,7 +654,13 @@ mod wasm_app {
                 None => return,
             };
 
-            let start_addr = parse_hex(&self.start_address).unwrap_or(0) as u32;
+            let start_addr = match parse_address(&self.start_address) {
+                Ok(address) => address,
+                Err(error) => {
+                    self.state.borrow_mut().async_op = AsyncOp::Error(error.to_string());
+                    return;
+                }
+            };
             let state = self.state.clone();
 
             {

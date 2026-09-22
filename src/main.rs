@@ -9,7 +9,7 @@ use em100::device::{Em100, HoldPinState};
 use em100::download::update_all_files;
 use em100::firmware::{firmware_dump, firmware_update};
 use em100::image::autocorrect_image;
-use em100::session::DeviceSession;
+use em100::session::{DeviceSession, parse_address};
 use em100::trace::{self, TraceState};
 use futures_lite::future::block_on;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -557,11 +557,13 @@ async fn run(args: Args) {
 
     // Download to device
     if let Some(download_file) = &args.download {
-        let spi_start_address = args
-            .start_address
-            .as_ref()
-            .and_then(|s| parse_hex(s))
-            .unwrap_or(0) as u32;
+        let spi_start_address = match args.start_address.as_deref().map(parse_address).transpose() {
+            Ok(address) => address.unwrap_or(0),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        };
 
         if spi_start_address != 0 {
             println!("SPI address: 0x{:08x}", spi_start_address);
@@ -601,7 +603,8 @@ async fn run(args: Args) {
 
         if data.len() > maxlen {
             if !args.truncate {
-                println!("Warning: image is larger than the chip");
+                eprintln!("Image is larger than the chip; pass --truncate to discard excess bytes");
+                std::process::exit(1);
             }
             data.truncate(maxlen);
         }
@@ -644,18 +647,32 @@ async fn run(args: Args) {
 
         // Handle start address
         if spi_start_address != 0 {
-            // Read existing data and merge
+            // Stop before reading: the target must not change flash while
+            // the snapshot is merged and written back.
+            if let Err(e) = session.stop_for_mutation().await {
+                eprintln!("Could not stop emulation: {e}");
+                std::process::exit(1);
+            }
             match read_memory_with_progress(&mut session, 0, maxlen).await {
                 Ok(mut existing) => {
                     let start = spi_start_address as usize;
                     let end = start + data.len();
                     if end <= existing.len() {
                         existing[start..end].copy_from_slice(&data);
-                        if let Err(e) = write_memory_with_progress(&mut session, &existing, 0).await
-                        {
-                            eprintln!("Download error: {}", e);
+                        let progress = transfer_progress(existing.len());
+                        let result = session
+                            .write_memory(
+                                &existing,
+                                0,
+                                Some(&mut |sent, _| progress.set_position(sent as u64)),
+                            )
+                            .await;
+                        if let Err(e) = result {
+                            progress.abandon_with_message("Transfer failed");
+                            eprintln!("Download error: {e}");
                             std::process::exit(1);
                         }
+                        progress.finish_with_message("Transfer complete");
                     } else {
                         eprintln!(
                             "FATAL: image does not fit: start address 0x{:08x} plus file size {} exceeds the {} byte emulation buffer.",
