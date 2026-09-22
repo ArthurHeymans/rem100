@@ -28,9 +28,17 @@ enum SpiFrequency {
 
 /// Find flash descriptor in image
 fn find_fd(image: &[u8]) -> Option<usize> {
-    (0..image.len().saturating_sub(4))
+    (0..=image.len().checked_sub(4)?)
         .step_by(4)
         .find(|&i| LittleEndian::read_u32(&image[i..]) == FD_SIGNATURE)
+}
+
+fn find_fcba(image: &[u8]) -> Option<usize> {
+    let fd_offset = find_fd(image)?;
+    let flmap0 = LittleEndian::read_u32(image.get(fd_offset + 4..fd_offset + 8)?);
+    let fcba_offset = ((flmap0 & 0xff) as usize) << 4;
+    image.get(fcba_offset..fcba_offset + 4)?;
+    Some(fcba_offset)
 }
 
 /// Get IFD version from FCBA
@@ -89,22 +97,36 @@ fn set_em100_mode(image: &mut [u8], fcba_offset: usize, em100: &Em100) {
 pub fn autocorrect_image(em100: &Em100, image: &mut [u8]) -> Result<bool> {
     print!("Auto-detecting image type ... ");
 
-    if let Some(fd_offset) = find_fd(image) {
+    if let Some(fcba_offset) = find_fcba(image) {
         println!("IFD");
-
-        // Read flmap0 to find FCBA offset
-        let flmap0 = LittleEndian::read_u32(&image[fd_offset + 4..]);
-        let fcba_offset = ((flmap0 & 0xff) as usize) << 4;
-
-        if fcba_offset >= image.len() {
-            println!("Inconsistent image.");
-            return Ok(false);
-        }
-
         set_em100_mode(image, fcba_offset, em100);
         Ok(true)
     } else {
-        println!("<unknown>");
+        println!("<unknown or inconsistent>");
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FD_SIGNATURE, find_fcba, find_fd};
+
+    #[test]
+    fn descriptor_requires_complete_map_and_component() {
+        let mut image = [0u8; 32];
+        image[0..4].copy_from_slice(&FD_SIGNATURE.to_le_bytes());
+        image[4] = 1; // FCBA at 0x10
+        assert_eq!(find_fcba(&image), Some(16));
+        assert_eq!(find_fcba(&image[..19]), None);
+        assert_eq!(find_fcba(&image[..7]), None);
+    }
+
+    #[test]
+    fn signature_at_end_is_found_without_reading_past_image() {
+        assert_eq!(find_fd(&FD_SIGNATURE.to_le_bytes()), Some(0));
+        let mut image = [0u8; 8];
+        image[4..].copy_from_slice(&FD_SIGNATURE.to_le_bytes());
+        assert_eq!(find_fd(&image), Some(4));
+        assert_eq!(find_fcba(&image), None);
     }
 }
