@@ -126,7 +126,11 @@ pub fn parse_dcfg(data: &[u8]) -> Result<ChipDesc> {
     let mut reg_offset = INIT_SEQUENCE_REGISTER_OFFSET_0;
     let mut pos = init_offset;
 
-    while pos + 4 <= DEDIPROG_CFG_PRO_SIZE && init_len < NUM_INIT_ENTRIES {
+    while pos
+        .checked_add(4)
+        .is_some_and(|end| end <= DEDIPROG_CFG_PRO_SIZE)
+        && init_len < NUM_INIT_ENTRIES
+    {
         let value = LittleEndian::read_u16(&data[pos..pos + 2]);
         let reg = LittleEndian::read_u16(&data[pos + 2..pos + 4]);
 
@@ -136,7 +140,9 @@ pub fn parse_dcfg(data: &[u8]) -> Result<ChipDesc> {
             continue;
         }
 
-        let full_reg = reg + reg_offset;
+        let full_reg = reg.checked_add(reg_offset).ok_or_else(|| {
+            Error::InvalidConfig("Initialization register out of range".to_string())
+        })?;
 
         // Convert to big endian for output
         let be_value = value.to_be_bytes();
@@ -184,6 +190,11 @@ pub fn parse_dcfg(data: &[u8]) -> Result<ChipDesc> {
 }
 
 fn parse_sfdp(data: &[u8], chip: &mut ChipDesc, entries: usize) -> Result<usize> {
+    if entries >= NUM_INIT_ENTRIES {
+        return Err(Error::InvalidConfig(
+            "Too many initialization entries".to_string(),
+        ));
+    }
     if data.len() < DEDIPROG_CFG_PRO_SIZE_SFDP {
         return Err(Error::InvalidConfig("SFDP data too small".to_string()));
     }
@@ -277,6 +288,19 @@ pub struct ChipDatabase {
 include!(concat!(env!("OUT_DIR"), "/chip_data.rs"));
 
 impl ChipDatabase {
+    fn from_parsed_chips(mut chips: Vec<ChipDesc>, version: String) -> Self {
+        chips.sort_by(|a, b| a.vendor.cmp(&b.vendor).then(a.name.cmp(&b.name)));
+        Self { chips, version }
+    }
+
+    fn from_lenient_data<'a>(data: impl IntoIterator<Item = &'a [u8]>, version: String) -> Self {
+        let chips = data
+            .into_iter()
+            .filter_map(|data| parse_dcfg(data).ok())
+            .collect();
+        Self::from_parsed_chips(chips, version)
+    }
+
     /// Load chip database from configs.tar.xz.
     #[cfg(feature = "cli")]
     pub fn load() -> Result<Self> {
@@ -285,47 +309,31 @@ impl ChipDatabase {
 
         let version_data = configs.find("configs/VERSION")?;
         let version = String::from_utf8_lossy(&version_data).trim().to_string();
-        let mut chips = Vec::new();
-
-        for entry in configs.entries() {
-            if entry.ends_with(".cfg") {
-                if let Ok(data) = configs.find(entry) {
-                    if let Ok(chip) = parse_dcfg(&data) {
-                        chips.push(chip);
-                    }
-                }
-            }
-        }
-        chips.sort_by(|a, b| a.vendor.cmp(&b.vendor).then(a.name.cmp(&b.name)));
-
-        Ok(Self { chips, version })
+        let data: Vec<_> = configs
+            .entries()
+            .filter(|entry| entry.ends_with(".cfg"))
+            .filter_map(|entry| configs.find(entry).ok())
+            .collect();
+        Ok(Self::from_lenient_data(
+            data.iter().map(Vec::as_slice),
+            version,
+        ))
     }
 
     /// Load chip database from embedded data.
     pub fn load_embedded() -> Self {
-        let mut chips = Vec::new();
-        for (_name, data) in EMBEDDED_CHIP_CONFIGS {
-            if let Ok(chip) = parse_dcfg(data) {
-                chips.push(chip);
-            }
-        }
-        chips.sort_by(|a, b| a.vendor.cmp(&b.vendor).then(a.name.cmp(&b.name)));
-
-        Self {
-            chips,
-            version: "embedded".to_string(),
-        }
+        Self::from_lenient_data(
+            EMBEDDED_CHIP_CONFIGS.iter().copied(),
+            "embedded".to_string(),
+        )
     }
 
-    /// Create chip database from in-memory data.
+    /// Create chip database from in-memory data, skipping invalid entries.
     pub fn from_data(chip_configs: Vec<(&str, &[u8])>, version: String) -> Result<Self> {
-        let mut chips = Vec::new();
-        for (_name, data) in chip_configs {
-            if let Ok(chip) = parse_dcfg(data) {
-                chips.push(chip);
-            }
-        }
-        Ok(Self { chips, version })
+        Ok(Self::from_lenient_data(
+            chip_configs.into_iter().map(|(_, data)| data),
+            version,
+        ))
     }
 
     /// Find a chip by name.
@@ -366,7 +374,35 @@ pub fn get_em100_file(name: &str) -> Result<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::ChipDesc;
+    use super::{ChipDatabase, ChipDesc, parse_dcfg};
+
+    fn config() -> Vec<u8> {
+        let mut data = vec![0; 176];
+        data[..4].copy_from_slice(b"Dcfg");
+        data[4..8].copy_from_slice(&[1, 0, 1, 0]);
+        data[8..12].copy_from_slice(&128u32.to_le_bytes());
+        data
+    }
+
+    #[test]
+    fn malformed_initialization_cannot_panic() {
+        let mut data = config();
+        data[128..132].copy_from_slice(&[0, 0, 0xff, 0xff]);
+        assert!(parse_dcfg(&data).is_err());
+
+        let mut data = config();
+        for _ in 0..3 {
+            data.extend_from_slice(b"SFDP");
+            data.extend_from_slice(&[0; 256]);
+        }
+        assert!(parse_dcfg(&data).is_err());
+    }
+
+    #[test]
+    fn in_memory_database_skips_invalid_configs() {
+        let database = ChipDatabase::from_data(vec![("bad.cfg", &[0; 4])], "test".into()).unwrap();
+        assert!(database.chips.is_empty());
+    }
 
     #[test]
     fn init_register_value_finds_fpga_writes() {

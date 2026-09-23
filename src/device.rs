@@ -594,25 +594,33 @@ impl Em100 {
             return Ok(());
         }
 
-        let mut page = [0u8; 512];
-        page[..256].copy_from_slice(&data);
-        page[2] = serial as u8;
-        page[3] = (serial >> 8) as u8;
-        page[4] = (serial >> 16) as u8;
-        page[5] = (serial >> 24) as u8;
+        data[2..6].copy_from_slice(&serial.to_le_bytes());
 
         if old_serial != 0xffffffff {
-            // Preserve magic
-            let mut magic = [0u8; 256];
-            crate::spi::read_spi_flash_page(self, 0x1f0000, &mut magic).await?;
-            page[256..512].copy_from_slice(&magic);
+            // The C tool restores only the secret-key and serial pages, but
+            // other pages in this sector may contain device-specific data.
+            // Read everything before erasing and restore every populated page.
+            let mut sector = vec![0u8; 0x10000];
+            for (index, page) in sector.chunks_exact_mut(256).enumerate() {
+                if index == 255 {
+                    page.copy_from_slice(&data);
+                } else {
+                    crate::spi::read_spi_flash_page(self, 0x1f0000 + (index * 256) as u32, page)
+                        .await?;
+                }
+            }
             crate::spi::unlock_spi_flash(self).await?;
             crate::spi::get_spi_flash_id(self).await?;
             crate::spi::erase_spi_flash_sector(self, 0x1f).await?;
-            crate::spi::write_spi_flash_page(self, 0x1f0000, &page[256..512]).await?;
+            for (index, page) in sector.chunks_exact(256).enumerate() {
+                if page.iter().any(|&byte| byte != 0xff) {
+                    crate::spi::write_spi_flash_page(self, 0x1f0000 + (index * 256) as u32, page)
+                        .await?;
+                }
+            }
+        } else {
+            crate::spi::write_spi_flash_page(self, 0x1fff00, &data).await?;
         }
-
-        crate::spi::write_spi_flash_page(self, 0x1fff00, &page[..256]).await?;
 
         // Re-read serial number
         self.get_device_info().await?;

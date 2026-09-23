@@ -31,36 +31,6 @@ fn download_configs() -> io::Result<Vec<u8>> {
     }
 }
 
-fn parse_chip_name(data: &[u8]) -> Option<(String, String)> {
-    use byteorder::{ByteOrder, LittleEndian};
-
-    if data.len() < 64 {
-        return None;
-    }
-
-    let magic = LittleEndian::read_u32(&data[0..4]);
-    if magic != 0x67666344 {
-        // 'Dcfg'
-        return None;
-    }
-
-    // Vendor is at offset 32 (16 bytes)
-    let vendor_end = data[32..48].iter().position(|&b| b == 0).unwrap_or(16);
-    let vendor = String::from_utf8_lossy(&data[32..32 + vendor_end]).to_string();
-
-    // Chip name is at offset 48 (16 bytes)
-    let name_end = data[48..64].iter().position(|&b| b == 0).unwrap_or(16);
-    let name = String::from_utf8_lossy(&data[48..48 + name_end]).to_string();
-
-    if vendor.is_empty() && name.is_empty() {
-        None
-    } else if vendor.is_empty() {
-        Some(("Unknown".to_string(), name))
-    } else {
-        Some((vendor, name))
-    }
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=build.rs");
 
@@ -90,8 +60,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut data = Vec::new();
                     entry.read_to_end(&mut data)?;
 
-                    if let Some((vendor, name)) = parse_chip_name(&data) {
-                        chips.push((vendor, name, data));
+                    if data.len() >= 176 && data.starts_with(b"Dcfg") {
+                        chips.push(data);
                     }
                 }
             }
@@ -112,11 +82,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     writeln!(f, "// Automatically generated at build time")?;
     writeln!(f)?;
     writeln!(f, "// Embedded chip configuration data")?;
-    writeln!(f, "const EMBEDDED_CHIP_CONFIGS: &[(&str, &[u8])] = &[")?;
+    writeln!(f, "const EMBEDDED_CHIP_CONFIGS: &[&[u8]] = &[")?;
 
-    for (vendor, name, data) in &chip_data {
-        let chip_name = format!("{} {}", vendor, name);
-        write!(f, "    (\"{}\", &[", chip_name)?;
+    for data in &chip_data {
+        write!(f, "    &[")?;
         for (i, byte) in data.iter().enumerate() {
             if i > 0 {
                 write!(f, ",")?;
@@ -128,7 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             write!(f, "{:#04x}", byte)?;
         }
         writeln!(f)?;
-        writeln!(f, "    ]),")?;
+        writeln!(f, "    ],")?;
     }
 
     writeln!(f, "];")?;

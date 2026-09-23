@@ -7,6 +7,21 @@ use crate::usb;
 
 /// Transfer chunk size (2MB)
 const TRANSFER_LENGTH: usize = 0x200000;
+pub(crate) const MAX_EMULATION_SIZE: usize = 0x4000000;
+
+/// Reject memory ranges that overflow or exceed the supported SDRAM capacity.
+pub(crate) fn validate_memory_range(address: u32, length: usize, capacity: usize) -> Result<()> {
+    if (address as usize)
+        .checked_add(length)
+        .is_some_and(|end| end <= capacity && length <= u32::MAX as usize)
+    {
+        Ok(())
+    } else {
+        Err(Error::InvalidArgument(format!(
+            "Memory range 0x{address:08x} + {length} exceeds {capacity} bytes"
+        )))
+    }
+}
 
 /// Progress callback type for reporting transfer progress
 /// Arguments: (bytes_transferred, total_bytes)
@@ -19,6 +34,7 @@ pub async fn read_sdram_with_progress(
     length: usize,
     mut progress: ProgressCallback<'_>,
 ) -> Result<Vec<u8>> {
+    validate_memory_range(address, length, MAX_EMULATION_SIZE)?;
     usb::send_command(
         &mut em100.endpoint_out,
         command::read(address, length as u32),
@@ -54,39 +70,7 @@ pub async fn read_sdram_with_progress(
     Ok(data)
 }
 
-/// Read data from SDRAM (convenience wrapper with CLI progress bar)
-#[cfg(feature = "cli")]
-pub async fn read_sdram(em100: &mut Em100, address: u32, length: usize) -> Result<Vec<u8>> {
-    use indicatif::{ProgressBar, ProgressStyle};
-
-    let pb = ProgressBar::new(length as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
-            .unwrap()
-            .progress_chars("#>-"),
-    );
-
-    let result = read_sdram_with_progress(
-        em100,
-        address,
-        length,
-        Some(&mut |bytes_read, _total| {
-            pb.set_position(bytes_read as u64);
-        }),
-    )
-    .await;
-
-    match &result {
-        Ok(_) => pb.finish_with_message("Read complete"),
-        Err(_) => pb.abandon_with_message("Read failed"),
-    }
-
-    result
-}
-
-/// Read data from SDRAM (no progress display)
-#[cfg(not(feature = "cli"))]
+/// Read data from SDRAM without a progress callback.
 pub async fn read_sdram(em100: &mut Em100, address: u32, length: usize) -> Result<Vec<u8>> {
     read_sdram_with_progress(em100, address, length, None).await
 }
@@ -99,6 +83,7 @@ pub async fn write_sdram_with_progress(
     mut progress: ProgressCallback<'_>,
 ) -> Result<()> {
     let length = data.len();
+    validate_memory_range(address, length, MAX_EMULATION_SIZE)?;
 
     usb::send_command(
         &mut em100.endpoint_out,
@@ -136,40 +121,7 @@ pub async fn write_sdram_with_progress(
     Ok(())
 }
 
-/// Write data to SDRAM (convenience wrapper with CLI progress bar)
-#[cfg(feature = "cli")]
-pub async fn write_sdram(em100: &mut Em100, data: &[u8], address: u32) -> Result<()> {
-    use indicatif::{ProgressBar, ProgressStyle};
-
-    let length = data.len();
-    let pb = ProgressBar::new(length as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
-            .unwrap()
-            .progress_chars("#>-"),
-    );
-
-    let result = write_sdram_with_progress(
-        em100,
-        data,
-        address,
-        Some(&mut |bytes_sent, _total| {
-            pb.set_position(bytes_sent as u64);
-        }),
-    )
-    .await;
-
-    match &result {
-        Ok(_) => pb.finish_with_message("Transfer complete"),
-        Err(_) => pb.abandon_with_message("Transfer failed"),
-    }
-
-    result
-}
-
-/// Write data to SDRAM (no progress display)
-#[cfg(not(feature = "cli"))]
+/// Write data to SDRAM without a progress callback.
 pub async fn write_sdram(em100: &mut Em100, data: &[u8], address: u32) -> Result<()> {
     write_sdram_with_progress(em100, data, address, None).await
 }

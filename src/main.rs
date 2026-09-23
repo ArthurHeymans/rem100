@@ -9,7 +9,7 @@ use em100::device::{Em100, HoldPinState};
 use em100::download::update_all_files;
 use em100::firmware::{firmware_dump, firmware_update};
 use em100::image::autocorrect_image;
-use em100::session::DeviceSession;
+use em100::session::{DeviceSession, parse_address};
 use em100::trace::{self, TraceState};
 use futures_lite::future::block_on;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -192,23 +192,25 @@ fn parse_hex(s: &str) -> Option<u64> {
     }
 }
 
-fn parse_device(s: &str) -> (Option<u8>, Option<u8>, Option<u32>) {
-    let s = s.to_uppercase();
-    if s.starts_with("DP") || s.starts_with("EM") {
-        // Serial number
-        if let Ok(serial) = s[2..].parse::<u32>() {
-            return (None, None, Some(serial));
-        }
-    } else if s.contains(':') {
-        // Bus:device
-        let parts: Vec<&str> = s.split(':').collect();
-        if parts.len() == 2 {
-            if let (Ok(bus), Ok(dev)) = (parts[0].parse::<u8>(), parts[1].parse::<u8>()) {
-                return (Some(bus), Some(dev), None);
-            }
+type DeviceSelection = (Option<u8>, Option<u8>, Option<u32>);
+
+fn parse_device(s: &str) -> Result<DeviceSelection, String> {
+    let selection = s.to_ascii_uppercase();
+    if let Some(serial) = selection
+        .strip_prefix("DP")
+        .or_else(|| selection.strip_prefix("EM"))
+    {
+        return serial
+            .parse::<u32>()
+            .map(|serial| (None, None, Some(serial)))
+            .map_err(|_| format!("Invalid device selector: {s}"));
+    }
+    if let Some((bus, device)) = selection.split_once(':') {
+        if let (Ok(bus), Ok(device)) = (bus.parse::<u8>(), device.parse::<u8>()) {
+            return Ok((Some(bus), Some(device), None));
         }
     }
-    (None, None, None)
+    Err(format!("Invalid device selector: {s}"))
 }
 
 fn transfer_progress(length: usize) -> ProgressBar {
@@ -302,11 +304,13 @@ async fn run(args: Args) {
     }
 
     // Parse device selection
-    let (bus, device, serial) = args
-        .device
-        .as_ref()
-        .map(|d| parse_device(d))
-        .unwrap_or((None, None, None));
+    let (bus, device, serial) = match args.device.as_deref().map(parse_device).transpose() {
+        Ok(selection) => selection.unwrap_or((None, None, None)),
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
 
     // Open device
     let em100 = match Em100::open(bus, device, serial).await {
@@ -557,11 +561,13 @@ async fn run(args: Args) {
 
     // Download to device
     if let Some(download_file) = &args.download {
-        let spi_start_address = args
-            .start_address
-            .as_ref()
-            .and_then(|s| parse_hex(s))
-            .unwrap_or(0) as u32;
+        let spi_start_address = match args.start_address.as_deref().map(parse_address).transpose() {
+            Ok(address) => address.unwrap_or(0),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        };
 
         if spi_start_address != 0 {
             println!("SPI address: 0x{:08x}", spi_start_address);
@@ -601,7 +607,8 @@ async fn run(args: Args) {
 
         if data.len() > maxlen {
             if !args.truncate {
-                println!("Warning: image is larger than the chip");
+                eprintln!("Image is larger than the chip; pass --truncate to discard excess bytes");
+                std::process::exit(1);
             }
             data.truncate(maxlen);
         }
@@ -644,18 +651,32 @@ async fn run(args: Args) {
 
         // Handle start address
         if spi_start_address != 0 {
-            // Read existing data and merge
+            // Stop before reading: the target must not change flash while
+            // the snapshot is merged and written back.
+            if let Err(e) = session.stop_for_mutation().await {
+                eprintln!("Could not stop emulation: {e}");
+                std::process::exit(1);
+            }
             match read_memory_with_progress(&mut session, 0, maxlen).await {
                 Ok(mut existing) => {
                     let start = spi_start_address as usize;
                     let end = start + data.len();
                     if end <= existing.len() {
                         existing[start..end].copy_from_slice(&data);
-                        if let Err(e) = write_memory_with_progress(&mut session, &existing, 0).await
-                        {
-                            eprintln!("Download error: {}", e);
+                        let progress = transfer_progress(existing.len());
+                        let result = session
+                            .write_memory(
+                                &existing,
+                                0,
+                                Some(&mut |sent, _| progress.set_position(sent as u64)),
+                            )
+                            .await;
+                        if let Err(e) = result {
+                            progress.abandon_with_message("Transfer failed");
+                            eprintln!("Download error: {e}");
                             std::process::exit(1);
                         }
+                        progress.finish_with_message("Transfer complete");
                     } else {
                         eprintln!(
                             "FATAL: image does not fit: start address 0x{:08x} plus file size {} exceeds the {} byte emulation buffer.",
@@ -893,5 +914,19 @@ async fn run(args: Args) {
                 eprintln!("Error: Failed to set EM100 to float: {}", e);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_device;
+
+    #[test]
+    fn invalid_device_selection_never_falls_back_to_default_device() {
+        assert_eq!(parse_device("EM1234").unwrap(), (None, None, Some(1234)));
+        assert_eq!(parse_device("1:2").unwrap(), (Some(1), Some(2), None));
+        assert!(parse_device("EMbad").is_err());
+        assert!(parse_device("1:2:3").is_err());
+        assert!(parse_device("anything").is_err());
     }
 }

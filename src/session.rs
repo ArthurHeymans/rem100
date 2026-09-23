@@ -6,8 +6,46 @@
 
 use crate::chips::ChipDesc;
 use crate::device::{DeviceInfo, Em100, HoldPinState};
-use crate::error::Result;
-use crate::sdram::{ProgressCallback, read_sdram_with_progress, write_sdram_with_progress};
+use crate::error::{Error, Result};
+use crate::usb;
+
+/// Parse a decimal address or one prefixed with 0x, without lossy casts.
+pub fn parse_address(value: &str) -> Result<u32> {
+    let value = value.trim();
+    let parsed = if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        u32::from_str_radix(hex, 16)
+    } else {
+        value.parse::<u32>()
+    };
+    parsed.map_err(|_| Error::InvalidArgument(format!("Invalid address: {value}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_address, validate_memory_range};
+
+    #[test]
+    fn addresses_reject_typos_and_overflow() {
+        assert_eq!(parse_address("0x100").unwrap(), 256);
+        assert_eq!(parse_address("100").unwrap(), 100);
+        assert!(parse_address("not-an-address").is_err());
+        assert!(parse_address("0x100000000").is_err());
+    }
+
+    #[test]
+    fn memory_writes_must_fit_the_chip() {
+        assert!(validate_memory_range(0x100, 0x100, 0x200).is_ok());
+        assert!(validate_memory_range(0x101, 0x100, 0x200).is_err());
+        assert!(validate_memory_range(u32::MAX, 2, 0x4000000).is_err());
+    }
+}
+use crate::sdram::{
+    MAX_EMULATION_SIZE, ProgressCallback, read_sdram_with_progress, validate_memory_range,
+    write_sdram_with_progress,
+};
 
 /// Last device state known to the application.
 #[derive(Clone)]
@@ -98,6 +136,13 @@ impl DeviceSession {
         Ok(())
     }
 
+    /// Refresh the cached state from hardware, leaving it unknown if the read fails.
+    pub async fn refresh_emulation_state(&mut self) -> Result<bool> {
+        let running = self.device.get_state().await;
+        self.state.is_running = running.as_ref().ok().copied();
+        running
+    }
+
     pub async fn set_hold_pin(&mut self, state: HoldPinState) -> Result<()> {
         self.device.set_hold_pin_state(state).await?;
         self.state.hold_pin_state = Some(state);
@@ -115,9 +160,25 @@ impl DeviceSession {
         Ok(())
     }
 
+    /// Stop emulation and confirm that it stopped before changing memory or
+    /// chip configuration. A state write can succeed before the FPGA settles.
+    pub async fn stop_for_mutation(&mut self) -> Result<()> {
+        self.set_emulation_state(false).await?;
+        for _ in 0..3 {
+            match self.device.get_state().await {
+                Ok(false) => return Ok(()),
+                Ok(true) | Err(_) => usb::sleep_ms(50).await,
+            }
+        }
+        self.state.is_running = None;
+        Err(Error::OperationFailed(
+            "Could not confirm that emulation stopped".to_string(),
+        ))
+    }
+
     /// Stop emulation before configuring a chip.
     pub async fn stop_and_configure_chip(&mut self, chip: &ChipDesc) -> Result<()> {
-        self.set_emulation_state(false).await?;
+        self.stop_for_mutation().await?;
         self.configure_chip(chip).await
     }
 
@@ -136,6 +197,14 @@ impl DeviceSession {
         address: u32,
         progress: ProgressCallback<'_>,
     ) -> Result<()> {
+        validate_memory_range(
+            address,
+            data.len(),
+            self.state
+                .configured_chip
+                .as_ref()
+                .map_or(MAX_EMULATION_SIZE, |c| c.size as usize),
+        )?;
         write_sdram_with_progress(&mut self.device, data, address, progress).await
     }
 
@@ -146,7 +215,16 @@ impl DeviceSession {
         address: u32,
         progress: ProgressCallback<'_>,
     ) -> Result<()> {
-        self.set_emulation_state(false).await?;
+        // Reject invalid writes before stopping a running device.
+        validate_memory_range(
+            address,
+            data.len(),
+            self.state
+                .configured_chip
+                .as_ref()
+                .map_or(MAX_EMULATION_SIZE, |c| c.size as usize),
+        )?;
+        self.stop_for_mutation().await?;
         self.write_memory(data, address, progress).await
     }
 
@@ -156,6 +234,7 @@ impl DeviceSession {
         length: usize,
         progress: ProgressCallback<'_>,
     ) -> Result<Vec<u8>> {
+        validate_memory_range(address, length, MAX_EMULATION_SIZE)?;
         read_sdram_with_progress(&mut self.device, address, length, progress).await
     }
 

@@ -12,7 +12,7 @@ mod wasm_app {
     use egui::Color32;
     use em100::chips::{ChipDatabase, ChipDesc};
     use em100::device::{Em100, HoldPinState};
-    use em100::session::{DeviceSession, DeviceState};
+    use em100::session::{DeviceSession, DeviceState, parse_address};
     use em100::trace::{TraceEvent, TraceState, decode_spi_trace_reports, trace_display_tail};
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -473,10 +473,11 @@ mod wasm_app {
                 if s.trace_active {
                     return;
                 }
+                // Reserve the session while checking hardware, but don't mark
+                // trace capture active until the device confirms it is running.
                 s.trace_generation = s.trace_generation.wrapping_add(1);
-                s.trace_running = true;
-                s.trace_active = true;
-                s.async_op = AsyncOp::InProgress("Starting SPI trace capture...".to_string());
+                s.device_op_active = true;
+                s.async_op = AsyncOp::InProgress("Checking emulation state...".to_string());
                 s.trace_generation
             };
 
@@ -485,6 +486,42 @@ mod wasm_app {
             let brief = self.trace_brief;
             let address_mode = self.state.borrow().device_state().address_mode();
             spawn_local(async move {
+                let mut device = state.borrow_mut().device.take();
+                let running = match device.as_mut() {
+                    Some(device) => device.refresh_emulation_state().await,
+                    None => Err(em100::Error::DeviceNotFound),
+                };
+                {
+                    let mut s = state.borrow_mut();
+                    if s.trace_generation != generation {
+                        repaint.request_repaint();
+                        return;
+                    }
+                    s.restore_device(device);
+                    match running {
+                        Ok(true) => {
+                            s.trace_running = true;
+                            s.trace_active = true;
+                            s.async_op =
+                                AsyncOp::InProgress("Starting SPI trace capture...".to_string());
+                        }
+                        Ok(false) => {
+                            s.async_op = AsyncOp::Error(
+                                "Start emulation before starting trace capture".to_string(),
+                            );
+                            repaint.request_repaint();
+                            return;
+                        }
+                        Err(error) => {
+                            s.async_op = AsyncOp::Error(format!(
+                                "Could not confirm emulation state: {error}"
+                            ));
+                            repaint.request_repaint();
+                            return;
+                        }
+                    }
+                }
+
                 let mut device = state.borrow_mut().device.take();
                 let reset_result = match device.as_mut() {
                     Some(device) => device.reset_spi_trace().await,
@@ -654,7 +691,13 @@ mod wasm_app {
                 None => return,
             };
 
-            let start_addr = parse_hex(&self.start_address).unwrap_or(0) as u32;
+            let start_addr = match parse_address(&self.start_address) {
+                Ok(address) => address,
+                Err(error) => {
+                    self.state.borrow_mut().async_op = AsyncOp::Error(error.to_string());
+                    return;
+                }
+            };
             let state = self.state.clone();
 
             {
@@ -1094,8 +1137,6 @@ mod wasm_app {
                 let progress_message = state.progress_message.clone();
                 let is_busy = state.device_busy() || state.trace_active;
                 let download_data_len = state.download_data.as_ref().map(|d| d.len());
-                // Clone download data for save button (only when needed)
-                let download_data_for_save = state.download_data.clone();
                 drop(state);
 
                 // Upload to Device
@@ -1148,7 +1189,7 @@ mod wasm_app {
                     if let Some(len) = download_data_len {
                         ui.label(format!("{} bytes", len));
                         if ui.button("Save As...").clicked() {
-                            if let Some(ref data) = download_data_for_save {
+                            if let Some(data) = self.state.borrow().download_data.as_ref() {
                                 let filename = configured_chip
                                     .as_ref()
                                     .map(|c| format!("{}.bin", c.name))
